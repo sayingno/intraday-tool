@@ -146,8 +146,10 @@ def run_full_audit(cfg: Config = DEFAULT_CONFIG, save: bool = True) -> dict:
     _collect_warnings(report)
     if save:
         cfg.paths.processed_dir.mkdir(parents=True, exist_ok=True)
-        cfg.paths.audit_report_json.write_text(json.dumps(report, indent=2, default=str))
-        cfg.paths.audit_report_txt.write_text(render_text(report))
+        cfg.paths.audit_report_json.write_text(
+            json.dumps(report, indent=2, default=str), encoding="utf-8"
+        )
+        cfg.paths.audit_report_txt.write_text(render_text(report), encoding="utf-8")
     return report
 
 

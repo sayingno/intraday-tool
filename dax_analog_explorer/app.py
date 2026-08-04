@@ -45,7 +45,14 @@ def load_data():
     daily = pd.read_parquet(p.daily_features)
     opening = pd.read_parquet(p.opening_path_features)
     master = pd.read_parquet(p.master_5m)
-    audit = p.audit_report_txt.read_text() if p.audit_report_txt.exists() else ""
+    audit = ""
+    if p.audit_report_txt.exists():
+        try:
+            audit = p.audit_report_txt.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            # Artifacts generated on Windows before UTF-8 was made explicit
+            # were encoded with the system code page (normally CP-1252).
+            audit = p.audit_report_txt.read_text(encoding="cp1252")
     return daily, opening, master, audit
 
 
