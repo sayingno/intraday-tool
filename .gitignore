@@ -1,0 +1,13 @@
+# derived artifacts (regenerate with: python -m dax_analog_explorer.preprocess)
+data/processed/
+# extracted raw csv (kept zipped in the repo as dax-5m.zip)
+dax-5m.csv
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
