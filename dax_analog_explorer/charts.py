@@ -1,0 +1,100 @@
+"""Plotly charts.
+
+The one non-negotiable: every intraday chart visually separates the OBSERVED
+window (09:00 .. cutoff) from the OUTCOME window (after the cutoff) with a
+vertical marker and shading, so it is obvious what the matcher was allowed to see.
+"""
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+
+from .config import Config, DEFAULT_CONFIG
+
+OBS_COLOR = "rgba(70,130,180,0.10)"
+OUT_COLOR = "rgba(200,120,60,0.10)"
+
+
+def day_candles(bars: pd.DataFrame, cutoff_min: int, cfg: Config = DEFAULT_CONFIG,
+                title: str = "", use_adj: bool = False) -> go.Figure:
+    """Candlestick for one session with observed/outcome split at the cutoff."""
+    b = bars.sort_values("mso")
+    pre = "adj_" if use_adj else ""
+    fig = go.Figure(go.Candlestick(
+        x=b["mso"], open=b[f"{pre}open"], high=b[f"{pre}high"],
+        low=b[f"{pre}low"], close=b[f"{pre}close"], name="price",
+        increasing_line_color="#2e9e5b", decreasing_line_color="#d1495b"))
+    lo = float(b[f"{pre}low"].min()); hi = float(b[f"{pre}high"].max())
+    fig.add_vrect(x0=b["mso"].min(), x1=cutoff_min, fillcolor=OBS_COLOR,
+                  line_width=0, annotation_text="observed", annotation_position="top left")
+    fig.add_vrect(x0=cutoff_min, x1=b["mso"].max(), fillcolor=OUT_COLOR,
+                  line_width=0, annotation_text="outcome", annotation_position="top right")
+    fig.add_vline(x=cutoff_min, line_dash="dash", line_color="#444")
+    fig.update_layout(title=title, xaxis_title="minutes since 09:00 (Berlin)",
+                      yaxis_title="price", xaxis_rangeslider_visible=False,
+                      height=360, margin=dict(l=40, r=20, t=40, b=40))
+    return fig
+
+
+def analog_overlay(grid: np.ndarray, mat: np.ndarray, kept: list, ref_date,
+                   cutoff_min: int, unit: str = "atr", max_lines: int = 25) -> go.Figure:
+    """All aligned paths (open=0), reference highlighted, cutoff marked."""
+    fig = go.Figure()
+    for i, d in enumerate(kept):
+        if d == ref_date:
+            continue
+        if i >= max_lines:
+            break
+        fig.add_trace(go.Scatter(x=grid, y=mat[i], mode="lines",
+                      line=dict(width=1, color="rgba(120,120,120,0.35)"),
+                      name=str(pd.Timestamp(d).date()), showlegend=False))
+    if ref_date in kept:
+        ri = kept.index(ref_date)
+        fig.add_trace(go.Scatter(x=grid, y=mat[ri], mode="lines",
+                      line=dict(width=3, color="#1f77b4"),
+                      name=f"REF {pd.Timestamp(ref_date).date()}"))
+    fig.add_hline(y=0, line_color="#999", line_width=1)
+    fig.add_vline(x=cutoff_min, line_dash="dash", line_color="#444")
+    fig.update_layout(title="Aligned opening paths (rebased at cash open)",
+                      xaxis_title="minutes since 09:00", yaxis_title=f"move ({unit})",
+                      height=380, margin=dict(l=40, r=20, t=40, b=40))
+    return fig
+
+
+def median_band(grid: np.ndarray, mat: np.ndarray, cutoff_min: int,
+                ref: np.ndarray | None = None, unit: str = "atr") -> go.Figure:
+    """Median analog path with a 25-75 percentile band."""
+    if mat.shape[0] == 0:
+        return go.Figure()
+    med = np.nanmedian(mat, axis=0)
+    q1 = np.nanpercentile(mat, 25, axis=0)
+    q3 = np.nanpercentile(mat, 75, axis=0)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=np.concatenate([grid, grid[::-1]]),
+                  y=np.concatenate([q3, q1[::-1]]), fill="toself",
+                  fillcolor="rgba(31,119,180,0.15)", line=dict(width=0),
+                  name="25-75 pctile"))
+    fig.add_trace(go.Scatter(x=grid, y=med, mode="lines",
+                  line=dict(width=3, color="#1f77b4"), name="median analog"))
+    if ref is not None:
+        fig.add_trace(go.Scatter(x=grid, y=ref, mode="lines",
+                      line=dict(width=2, dash="dot", color="#d1495b"), name="reference"))
+    fig.add_hline(y=0, line_color="#999", line_width=1)
+    fig.add_vline(x=cutoff_min, line_dash="dash", line_color="#444")
+    fig.update_layout(title="Median analog path + 25-75 band",
+                      xaxis_title="minutes since 09:00", yaxis_title=f"move ({unit})",
+                      height=380, margin=dict(l=40, r=20, t=40, b=40))
+    return fig
+
+
+def outcome_distribution(values: np.ndarray, title: str, xlabel: str) -> go.Figure:
+    v = np.asarray(values, dtype="float64")
+    v = v[~np.isnan(v)]
+    fig = go.Figure(go.Histogram(x=v, nbinsx=25, marker_color="#1f77b4"))
+    if len(v):
+        fig.add_vline(x=float(np.median(v)), line_dash="dash", line_color="#d1495b",
+                      annotation_text=f"median {np.median(v):.2f}")
+    fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title="days",
+                      height=300, margin=dict(l=40, r=20, t=40, b=40))
+    return fig
