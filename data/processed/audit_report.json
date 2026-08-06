@@ -147,28 +147,28 @@
       "n_sessions": 6181,
       "session_first_bar_mode": "08:00",
       "session_last_bar_mode": "22:00",
-      "cash_bars_per_day_median": 103.0,
+      "cash_bars_per_day_median": 102.0,
       "cash_bars_per_day_min": 1,
-      "cash_bars_per_day_max": 103
+      "cash_bars_per_day_max": 102
     },
     "missing_gaps": {
       "expected_cash_bars_per_full_day": 103,
-      "full_session_days": 6132,
-      "missing_cash_bars_total_on_full_days": 824,
-      "missing_cash_bars_pct_on_full_days": 0.13,
+      "full_session_days": 6130,
+      "missing_cash_bars_total_on_full_days": 6899,
+      "missing_cash_bars_pct_on_full_days": 1.093,
       "sessions_with_intraday_cash_gaps": 35
     }
   },
   "fdax_1m": {
     "dataset": "fdax_1m",
     "source_files": [
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202412_2024-11-01_to_2024-12-20.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202503_2024-12-23_to_2025-03-21.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202506_2025-03-24_to_2025-06-20.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202509_2025-06-23_to_2025-09-19.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202512_2025-09-22_to_2025-12-19.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202603_2025-12-23_to_2026-03-20.csv",
-      "C:\\Users\\toexp\\OneDrive\\Documents\\intraday-tool\\FDAX_1min_202606_2026-03-23_to_2026-05-19.csv"
+      "FDAX_1min_202412_2024-11-01_to_2024-12-20.csv",
+      "FDAX_1min_202503_2024-12-23_to_2025-03-21.csv",
+      "FDAX_1min_202506_2025-03-24_to_2025-06-20.csv",
+      "FDAX_1min_202509_2025-06-23_to_2025-09-19.csv",
+      "FDAX_1min_202512_2025-09-22_to_2025-12-19.csv",
+      "FDAX_1min_202603_2025-12-23_to_2026-03-20.csv",
+      "FDAX_1min_202606_2026-03-23_to_2026-05-19.csv"
     ],
     "n_raw_rows": 470989,
     "n_rows_clean": 470989,
@@ -196,15 +196,15 @@
       "n_sessions": 386,
       "session_first_bar_mode": "01:15",
       "session_last_bar_mode": "22:04",
-      "cash_bars_per_day_median": 511.0,
+      "cash_bars_per_day_median": 510.0,
       "cash_bars_per_day_min": 173,
-      "cash_bars_per_day_max": 511
+      "cash_bars_per_day_max": 510
     },
     "missing_gaps": {
       "expected_cash_bars_per_full_day": 511,
       "full_session_days": 385,
-      "missing_cash_bars_total_on_full_days": 0,
-      "missing_cash_bars_pct_on_full_days": 0.0,
+      "missing_cash_bars_total_on_full_days": 385,
+      "missing_cash_bars_pct_on_full_days": 0.196,
       "sessions_with_intraday_cash_gaps": 0
     }
   },

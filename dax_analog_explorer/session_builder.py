@@ -41,7 +41,11 @@ def attach_sessions(df: pd.DataFrame, cfg: Config = DEFAULT_CONFIG) -> pd.DataFr
     df["tod_min"] = berlin.dt.hour * 60 + berlin.dt.minute
     df["mso"] = df["tod_min"] - cfg.cash_open_minutes()   # minutes since cash open
     close_min = cfg.cash_close.hour * 60 + cfg.cash_close.minute
-    df["is_cash"] = (df["tod_min"] >= cfg.cash_open_minutes()) & (df["tod_min"] <= close_min)
+    # Bars are LEFT-labelled: the bar stamped 17:25 spans 17:25-17:30 and is the
+    # last bar of a 09:00-17:30 session; the bar stamped 17:30 spans 17:30-17:35
+    # and is already past the close.  Hence a strict '<' on the closing boundary --
+    # using '<=' put the post-close price into cash_close / previous_close.
+    df["is_cash"] = (df["tod_min"] >= cfg.cash_open_minutes()) & (df["tod_min"] < close_min)
     return df
 
 
