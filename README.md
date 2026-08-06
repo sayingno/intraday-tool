@@ -159,6 +159,63 @@ full gap fill, complete reversal, high-level range, two-sided volatile).
 
 ---
 
+## 7b. Price-action setups & conditional probabilities
+
+`price_action.py` answers a different question from the analog search: *"this
+exact setup — how often does the level actually come to me, given it hasn't
+already?"* It uses **no indicators**. Every opening-pressure test is a
+relationship between bar opens/highs/lows/closes, self-scaled by the bars' own
+ranges, the way structure is read off a chart by eye.
+
+```bash
+python -m dax_analog_explorer.setup_report                          # default ATH-trap setup
+python -m dax_analog_explorer.setup_report --close-beyond-prior-bar # add condition E
+python -m dax_analog_explorer.setup_report --gap-max 0.9 --dates-only
+python -m dax_analog_explorer.setup_report --direction up --below-pdl  # mirror it
+```
+
+The session table is cached under `data/processed/`, so the first run takes
+~30 s and every later threshold tweak is instant (`--rebuild` to recompute).
+
+### `PriceActionSpec` — the full parameter set
+
+| group | parameter | default | meaning |
+|---|---|---|---|
+| **context** | `ath_tolerance_pct` | 0.50 | `\|open − prior_ath\| / prior_ath × 100 ≤` |
+| | `require_new_ath_at_open` | False | `open > prior_ath` |
+| | `require_open_above_pdh` | True | `open > previous_day_high` |
+| | `require_open_below_pdl` | False | `open < previous_day_low` |
+| | `gap_min_pct` | +0.30 | `(open − prev 17:30 close) / prev close × 100 ≥` |
+| | `gap_max_pct` | +1.20 | upper bound — above ~0.6% the reversal branch disappears |
+| | `on_location_min` / `_max` | 0.70 / — | `(open − ON_low) / (ON_high − ON_low)` |
+| | `vol_regimes` | None | restrict to low / normal / high |
+| **pressure** | `pressure_window_min` | 15 | bars 1–3 on a 5 m chart |
+| | `direction` | "down" | "down" = selling pressure; "up" mirrors every test |
+| | `require_close_beyond_open` | True | **(A)** close at +15 m below the open |
+| | `close_location_max` | 0.33 | **(B)** `(close − low₁₅) / (high₁₅ − low₁₅) ≤` |
+| | `require_close_beyond_prior_bar` | False | **(E)** a bar closed below the prior bar's low |
+| | `require_monotonic_highs` | False | **(C)** `h1 > h2 > h3` |
+| | `min_directional_bars` | None | **(D)** count of bear bars ≥ n |
+| | `require_beyond_open_excursion` | False | **(F)** poked above the open, closed back below |
+| **decision** | `decision_bar` / `bar_minutes` | 6 / 5 | bar 6 → 09:30 |
+| **conditional** | `require_untested` | PDH, PDC, PDL | levels excluded from their own denominator once tested |
+| **outcome** | `morning_end_min` | 180 | 12:00 Berlin |
+
+Bar-1 direction is deliberately **not** a parameter: in this setup price
+essentially always pokes above the open first, so requiring a bearish first bar
+discards the "spike up then reject" days that belong to the pattern.
+
+### Conditional probability
+
+`conditional_report()` reports **P(level reached later | NOT reached by the
+decision bar)** — a level already touched before bar 6 leaves its own
+denominator, because you could not have entered ahead of it. That is what makes
+the number conditional rather than unconditional, and it is usually the lower
+(and more honest) figure.
+
+`build_funnel()` shows how many sessions survive each parameter in order, so the
+cost in sample size of every condition is visible before you trust a rate.
+
 ## 8. Running it
 
 ```bash
@@ -201,6 +258,8 @@ dax_analog_explorer/
   charts.py            plotly candles + aligned overlays + median band (observed vs outcome shaded)
   reports.py           interpreted query, distribution stats, dates-only
   search.py            orchestrator (reference → analogs → outcomes → explanations)
+  price_action.py      pure-geometry setup filtering + conditional probabilities
+  setup_report.py      CLI for setup scan + conditional-probability report
   preprocess.py        command-line pipeline
   app.py               Streamlit MVP
 tests/                 pytest: ATH, leakage, DST, prev-day, cutoff, rolls, gap-fill
