@@ -105,8 +105,20 @@ def session_outcome(cash_bars: pd.DataFrame, ref: dict, cutoff_min: int,
     return out
 
 
+def _empty_outcomes() -> pd.DataFrame:
+    """Empty result that still carries the join key.
+
+    A bare ``pd.DataFrame([])`` has no columns, which makes callers' merge on
+    ``session_date`` raise KeyError instead of yielding "no matches".
+    """
+    return pd.DataFrame({"session_date": pd.Series([], dtype="datetime64[ns]"),
+                         "cutoff_min": pd.Series([], dtype="int64")})
+
+
 def build_outcomes(master: pd.DataFrame, daily: pd.DataFrame, cutoff_min: int,
                    sessions: list, cfg: Config = DEFAULT_CONFIG) -> pd.DataFrame:
+    if len(sessions) == 0 or len(master) == 0 or len(daily) == 0:
+        return _empty_outcomes()
     ms = sb.attach_sessions(master, cfg)
     cash = ms[ms["is_cash"] & (ms["mso"] >= 0)]
     groups = dict(tuple(cash.groupby("session_date")))
@@ -123,4 +135,4 @@ def build_outcomes(master: pd.DataFrame, daily: pd.DataFrame, cutoff_min: int,
         o = session_outcome(groups[sd], ref, cutoff_min, cfg)
         o["session_date"] = sd
         rows.append(o)
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows) if rows else _empty_outcomes()

@@ -177,6 +177,21 @@ if st.session_state.get("run"):
                            spec=spec, weights=wts, period=period, n=n_results,
                            path_method=path_method, path_unit=path_unit, cfg=cfg)
 
+    if len(res.merged_top) == 0:
+        st.warning(
+            f"**No matching sessions.** The candidate pool was {res.n_pool} and "
+            "nothing survived the filters.\n\n"
+            "The opening-pattern filters are the usual cause — they are ANDed "
+            "together, so a few strict ones can empty the result. Try, in order:\n"
+            "1. **Extension ratio <** → raise it to 3.00 (turns it off)\n"
+            "2. **First-bar range ≥ percentile** → lower it to 0\n"
+            "3. **Bearish weakness before** → set to *none*\n"
+            "4. **ATH tolerance** → widen to 1.00%\n"
+            "5. **Historical period** → *Entire dataset*")
+        st.markdown(res.interpreted)
+        st.info(f"**Reference {res.reference_date.date()}** — {res.reference_desc}")
+        st.stop()
+
     tabs = st.tabs(["① Query & matches", "② Explanations", "③ Charts",
                     "④ Statistics", "⑤ Dates only", "⑥ Data audit"])
 

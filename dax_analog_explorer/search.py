@@ -149,6 +149,21 @@ def run_search(daily: pd.DataFrame, opening: pd.DataFrame | None, master: pd.Dat
     top = ranked.head(n).copy()
 
     # ----- outcomes + classification + explanations -----
+    # No candidate survived the filters: return an empty-but-well-formed result
+    # so the UI can say "no matches" instead of raising on the merge.
+    if len(top) == 0:
+        return AnalogResult(
+            reference_date=reference_date,
+            reference_desc=(describe_reference(m[m["session_date"] == reference_date].iloc[0], cfg)
+                            if (m["session_date"] == reference_date).any()
+                            else "(reference not in feature set)"),
+            cutoff_min=cutoff_min, cutoff_str=cutoff_str, mode=mode,
+            interpreted=rp.interpreted_query(spec, cutoff_str, period_label, n, mode),
+            tiers=tiers, ranked_top=top, merged_top=top.copy(), explanations={},
+            grid=grid, path_mat=mat, path_kept=kept, path_unit=path_unit,
+            stats=pd.DataFrame(), headline={"sample_size": 0},
+            n_pool=len(pool), period_label=period_label)
+
     outcomes = oe.build_outcomes(master, daily, cutoff_min, top["session_date"].tolist(), cfg)
     merged_top = top.merge(m, on="session_date", how="left").merge(
         outcomes, on="session_date", how="left", suffixes=("", "_out"))

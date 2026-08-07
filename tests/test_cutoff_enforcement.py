@@ -39,3 +39,21 @@ def test_observed_high_break_uses_only_pre_cutoff_high():
     o2 = oe.session_outcome(cash_frame(ohlc=obs + [(101, 101.2, 100, 100.5)]),
                             default_ref(cash_open=100.0), 30, CFG)
     assert o2["break_observed_high"] is False
+
+
+def test_empty_result_does_not_crash():
+    """Filters that match nothing must return an empty result, not raise.
+
+    Regression: build_outcomes([]) produced a DataFrame with NO columns, so
+    search.run_search raised KeyError('session_date') on the merge instead of
+    reporting "no matches".
+    """
+    import pandas as pd
+    from dax_analog_explorer import outcome_engine as oe
+
+    empty = oe.build_outcomes(pd.DataFrame(), pd.DataFrame(), 30, [], CFG)
+    assert "session_date" in empty.columns
+    assert len(empty) == 0
+    # a merge on the key must now work rather than raise
+    left = pd.DataFrame({"session_date": pd.to_datetime(["2024-01-02"])})
+    assert len(left.merge(empty, on="session_date", how="left")) == 1
