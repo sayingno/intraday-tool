@@ -114,3 +114,33 @@ def test_entry_fills_on_the_bar_after_the_decision_never_inside_it():
     bars = cash_frame(ohlc=ohlc)
     r = co.simulate_day(bars, side=1, rules=co.TradeRules(cost_points=0))
     assert r["entry"] == 200.0               # the bar-7 open, not any bar-1..6 price
+
+
+def test_degenerate_stop_distance_is_rejected():
+    """A stop sitting on the entry makes R~0 and net/R explodes.
+
+    Regression: the half_range stop produced R = 1e-13 points and an
+    R_multiple of -2.2e12, which silently destroyed the mean of any grid
+    cell it landed in.
+    """
+    from dax_analog_explorer import continuation as co
+    from conftest import cash_frame
+
+    # opening bars whose mid-range sits essentially at the next bar's open
+    ohlc = [(100, 100.02, 99.98, 100.0)] * 6 + [(100.0, 100.5, 99.5, 100.1),
+                                                (100.1, 100.4, 99.6, 100.0)]
+    bars = cash_frame(ohlc=ohlc)
+    r = co.simulate_day(bars, side=1, rules=co.TradeRules(stop_mode="half_range"))
+    assert r is None                     # rejected, not returned with a huge R multiple
+
+
+def test_normal_stop_distance_is_still_accepted():
+    from dax_analog_explorer import continuation as co
+    from conftest import cash_frame
+
+    ohlc = [(100 + i, 101 + i, 99 + i, 100.5 + i) for i in range(6)]
+    ohlc += [(106, 108, 105, 107), (107, 109, 106, 108)]
+    bars = cash_frame(ohlc=ohlc)
+    r = co.simulate_day(bars, side=1, rules=co.TradeRules(cost_points=0))
+    assert r is not None and r["R_points"] >= 1.0
+    assert abs(r["R_multiple"]) < 100    # sane magnitude

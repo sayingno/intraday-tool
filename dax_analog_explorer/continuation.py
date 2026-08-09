@@ -38,6 +38,12 @@ class TradeRules:
     trail_bars: int | None = None     # trail behind the extreme of the last N bars
     time_exit_min: int | None = None  # flatten at this minute-since-open
     cost_points: float = 2.0          # round-trip spread + commission, in points
+    # A stop landing almost exactly on the entry makes R ~ 0, and net/R then
+    # explodes -- observed at R = 1e-13 points giving -2.2e12 R, which silently
+    # destroys any average it enters.  Such a trade is not takeable in reality
+    # either, so require a real distance before accepting it.
+    min_R_points: float = 1.0
+    min_R_frac_of_range: float = 0.10   # ... and this much of the opening range
 
     def describe(self) -> list[str]:
         d = [f"enter at the open of the bar after {self.decision_min} min",
@@ -81,8 +87,9 @@ def simulate_day(g: pd.DataFrame, side: int, rules: TradeRules) -> dict | None:
     entry = float(aft["adj_open"].iloc[0])
     stop = _stop_price(obs, side, rules.stop_mode, entry)
     R = abs(entry - stop)
-    if R <= 0:
-        return None
+    or_range = float(obs["adj_high"].max() - obs["adj_low"].min())
+    if R < max(rules.min_R_points, rules.min_R_frac_of_range * or_range):
+        return None          # degenerate stop distance -- not a real trade
 
     target = entry + side * rules.target_R * R if rules.target_R else None
     be_done = False
