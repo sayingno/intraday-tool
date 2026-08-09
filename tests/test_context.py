@@ -144,3 +144,52 @@ def test_normal_stop_distance_is_still_accepted():
     r = co.simulate_day(bars, side=1, rules=co.TradeRules(cost_points=0))
     assert r is not None and r["R_points"] >= 1.0
     assert abs(r["R_multiple"]) < 100    # sane magnitude
+
+def test_multiday_frame_collapses_the_overnight_void():
+    """Xetra-hours view: only cash bars, indexed continuously across sessions."""
+    import numpy as np, pandas as pd
+    from zoneinfo import ZoneInfo
+    from dax_analog_explorer.config import Config
+    from dax_analog_explorer import chart_pdf as cp
+
+    BER = ZoneInfo("Europe/Berlin")
+    rows = []
+    for day in ("2024-06-03", "2024-06-04", "2024-06-05"):
+        d = pd.Timestamp(day)
+        # one overnight bar (03:00, outside cash) + three cash bars
+        for hh, mm in ((3, 0), (9, 0), (9, 5), (9, 10)):
+            t = pd.Timestamp(d.date(), tz=BER) + pd.Timedelta(hours=hh, minutes=mm)
+            rows.append({"dt": t, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+                         "adj_open": 100.0, "adj_high": 101.0, "adj_low": 99.0,
+                         "adj_close": 100.5, "volume": 1.0, "con_id": pd.NA,
+                         "contract_month": pd.NA, "instrument": "DAX5m", "source_file": "x"})
+    master = pd.DataFrame(rows)
+
+    f = cp.multiday_frame(master, "2024-06-05", lookback=2, cfg=Config())
+    assert len(f) == 9                                  # 3 sessions x 3 cash bars
+    assert f["tod_min"].min() >= 9 * 60                 # the 03:00 bars are gone
+    assert f["x"].tolist() == list(range(9))            # continuous, no gap for the void
+    assert f["session_date"].nunique() == 3
+    assert {"ema_fast", "ema_slow"} <= set(f.columns)
+
+
+def test_multiday_frame_respects_the_lookback_and_unknown_dates():
+    import pandas as pd
+    from zoneinfo import ZoneInfo
+    from dax_analog_explorer.config import Config
+    from dax_analog_explorer import chart_pdf as cp
+
+    BER = ZoneInfo("Europe/Berlin")
+    rows = []
+    for day in ("2024-06-03", "2024-06-04", "2024-06-05"):
+        d = pd.Timestamp(day)
+        t = pd.Timestamp(d.date(), tz=BER) + pd.Timedelta(hours=9)
+        rows.append({"dt": t, "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5,
+                     "adj_open": 100.0, "adj_high": 101.0, "adj_low": 99.0,
+                     "adj_close": 100.5, "volume": 1.0, "con_id": pd.NA,
+                     "contract_month": pd.NA, "instrument": "DAX5m", "source_file": "x"})
+    master = pd.DataFrame(rows)
+
+    assert cp.multiday_frame(master, "2024-06-05", 1, Config())["session_date"].nunique() == 2
+    assert cp.multiday_frame(master, "2024-06-05", 0, Config())["session_date"].nunique() == 1
+    assert cp.multiday_frame(master, "2030-01-01", 2, Config()).empty   # unknown date
