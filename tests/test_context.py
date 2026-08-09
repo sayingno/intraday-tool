@@ -86,3 +86,31 @@ def test_funnel_is_monotonic():
     surviving = f["surviving"].tolist()
     assert surviving == sorted(surviving, reverse=True)   # never grows
     assert surviving[0] == len(t)
+
+
+def test_backtest_takes_the_stop_when_a_bar_holds_both_levels():
+    """A 5m bar cannot prove which came first, so the stop must win."""
+    from dax_analog_explorer import continuation as co
+    from conftest import cash_frame
+
+    # 6 opening bars trending up, then one bar spanning BOTH the target and the stop
+    opening = [(100, 101, 99.5, 100.8), (100.8, 102, 100.5, 101.8),
+               (101.8, 103, 101.5, 102.8), (102.8, 104, 102.5, 103.8),
+               (103.8, 105, 103.5, 104.8), (104.8, 106, 104.5, 105.8)]
+    # bar 7 engulfs target and stop alike; bar 8 just keeps the session going
+    wild = [(105.8, 130, 90, 100), (100, 101, 99, 100)]
+    bars = cash_frame(ohlc=opening + wild)
+    r = co.simulate_day(bars, side=1, rules=co.TradeRules(target_R=2.0, cost_points=0))
+    assert r["reason"] == "stop"
+    assert r["R_multiple"] < 0
+
+
+def test_entry_fills_on_the_bar_after_the_decision_never_inside_it():
+    from dax_analog_explorer import continuation as co
+    from conftest import cash_frame
+
+    ohlc = [(100 + i, 101 + i, 99.5 + i, 100.8 + i) for i in range(6)]
+    ohlc += [(200, 205, 195, 200), (200, 202, 198, 201)]   # bar 7 opens far away
+    bars = cash_frame(ohlc=ohlc)
+    r = co.simulate_day(bars, side=1, rules=co.TradeRules(cost_points=0))
+    assert r["entry"] == 200.0               # the bar-7 open, not any bar-1..6 price
