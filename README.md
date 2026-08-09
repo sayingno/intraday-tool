@@ -216,6 +216,48 @@ the number conditional rather than unconditional, and it is usually the lower
 `build_funnel()` shows how many sessions survive each parameter in order, so the
 cost in sample size of every condition is visible before you trust a rate.
 
+## 7c. Categorical context recognition
+
+The ATH filter was a *threshold* ("within 0.25% of the high"). That is one value
+of a more general question — **where are we, and how did we get here** — so
+`context.py` replaces thresholds with named categories:
+
+| dimension | categories |
+|---|---|
+| **location** | `AT_ATH` · `NEAR_ATH` · `BREAKOUT_UP` · `UPPER_RANGE` · `MID_RANGE` · `LOWER_RANGE` · `BREAKDOWN` · `AT_LOWS` |
+| **swing** | `STRONG_BULL` · `BULL` · `RANGE` · `BEAR` · `STRONG_BEAR` |
+| **ma_state** | `ABOVE_RISING` · `ABOVE_FALLING` · `BELOW_RISING` · `BELOW_FALLING` |
+| **prior_day** | `TREND_UP` · `TREND_DOWN` · `REVERSAL_UP` · `REVERSAL_DOWN` · `BIG_RANGE` (news/shock) · `RANGE` · `INSIDE` · `OUTSIDE` |
+| **gap** | `LARGE_UP` · `MODERATE_UP` · `SMALL_UP` · `FLAT` · `SMALL_DOWN` · `MODERATE_DOWN` · `LARGE_DOWN` |
+| **open_loc** | `ABOVE_PDH` · `UPPER_PD` · `MID_PD` · `LOWER_PD` · `BELOW_PDL` |
+| **overnight** | `TREND_UP` · `TREND_DOWN` · `RANGE` · `REVERSAL_UP` · `REVERSAL_DOWN` |
+| **opening** | `DRIVE_UP` · `DRIVE_DOWN` · `REJECTION_UP` · `REJECTION_DOWN` · `RANGE_OPEN` |
+
+Inputs are restricted to **OHLC and moving averages** — no oscillators, no
+volume. Where a "big" or "small" judgement is needed the cut is a **rolling
+percentile of the instrument's own prior history**, so `LARGE_UP` means the same
+thing in 2003 and 2026. Everything is prior-only except `opening`, which is
+clamped at the observation cutoff.
+
+**Two definitions that matter.** A *rejection* requires a **meaningful
+excursion** (≥35% of the opening window's own range) before price closes back
+through the open — without that floor a one-tick poke counts and ~60% of all
+sessions get mislabelled as rejections. The overnight classifier uses the same
+give-back rule. `BIG_RANGE` (the news/shock footprint) is the top decile of the
+prior-day range against its own trailing distribution.
+
+```bash
+python -m dax_analog_explorer.context_report --list      # every category
+python -m dax_analog_explorer.context_report --profile   # label mix of the dataset
+python -m dax_analog_explorer.context_report             # the ATH bull trap
+python -m dax_analog_explorer.context_report --location AT_ATH NEAR_ATH --opening REJECTION_UP
+python -m dax_analog_explorer.context_report --prior-day BIG_RANGE --gap SMALL_UP
+```
+
+The report prints the condition chain, a funnel showing the sample-size cost of
+each category, the matching dates, and the same conditional-probability table as
+`setup_report` — *P(level reached | not reached by the decision bar)*.
+
 ## 8. Running it
 
 ```bash
@@ -258,6 +300,8 @@ dax_analog_explorer/
   charts.py            plotly candles + aligned overlays + median band (observed vs outcome shaded)
   reports.py           interpreted query, distribution stats, dates-only
   search.py            orchestrator (reference → analogs → outcomes → explanations)
+  context.py           categorical context + opening-pattern recognition (OHLC + MAs)
+  context_report.py    CLI for category-based scans
   price_action.py      pure-geometry setup filtering + conditional probabilities
   setup_report.py      CLI for setup scan + conditional-probability report
   preprocess.py        command-line pipeline
