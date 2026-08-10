@@ -189,3 +189,35 @@ def test_entry_is_cancelled_when_the_stop_level_breaks_before_the_fill():
     bars2 = cash_frame(ohlc=[(100, 101, 99, 100)] * 6 + ok)
     r2 = orp.simulate_signal(bars2, sig, otc.OTCParams())
     assert r2["status"] == "TRADED" and r2["reason"] == "target"
+
+
+def test_a_trigger_that_already_fired_is_not_hidden_by_a_later_quiet_bar():
+    """State is "what do I do now"; reached is "did this day ever produce it".
+
+    Regression: the walk set the state from the LAST bar, so a session that
+    counted an H1 at 10:00 and then simply ran reported DEVELOPING/WAIT at the
+    deadline and never mentioned the trigger -- and --profile, counting the same
+    field, answered "did a trigger fire on the very final bar" instead of "how
+    many days reach state C".
+    """
+    ohlc = [(100, 102, 99, 101.5), (101.5, 104, 101, 103.5),
+            (103.5, 106, 103, 105.5), (105.5, 108, 105, 107.5),
+            (107.5, 107, 104, 104.5),        # lower high -> the correction opens
+            (104.5, 106, 103, 103.5),        # still correcting
+            (103.5, 106.5, 103, 106)]        # H1: higher high, still under the leg high
+    quiet = [(106, 106.2, 105.8, 106.0)] * 3   # nothing new happens afterwards
+    res = otc.evaluate_session(cash_frame(ohlc=ohlc + quiet), {"PDH": 200.0}, P)
+
+    assert [s.label for s in res.signals] == ["H1"]
+    assert res.state == otc.DEVELOPING        # the last bar counted nothing
+    assert res.reached == otc.ACTIVE          # but the day did produce the setup
+
+    txt = otc.live_status(res, P)
+    assert "H1 at 09:30" in txt               # the trigger and its clock time
+    assert "NO NEW ENTRY" in txt              # not a bare "WAIT"
+
+
+def test_clock_maps_minutes_after_the_open_to_berlin_time():
+    assert otc.clock(0) == "09:00"
+    assert otc.clock(60) == "10:00"
+    assert otc.clock(90) == "10:30"

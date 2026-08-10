@@ -234,12 +234,33 @@ class OTCSignal:
     reason: str = ""
 
 
+RANK = {INVALID: 0, DEVELOPING: 1, ACTIVE: 2}
+
+
 @dataclass
 class OTCResult:
+    """Two different questions need two different answers.
+
+    ``state`` is what the LAST evaluated bar says -- "what do I do now?".  It
+    drops back to DEVELOPING the bar after a trigger fires, because there is no
+    fresh signal on that bar.
+
+    ``reached`` is the furthest state the session got to -- "did this day ever
+    produce the setup?".  Profiling has to use this one: counting ``state``
+    across history answers only "did a trigger fire on the very last bar", which
+    is not a question anybody asks.
+    """
     state: str
     leg: Leg | None
     signals: list[OTCSignal] = field(default_factory=list)
     state_trace: list[tuple[int, str]] = field(default_factory=list)
+    reached: str = INVALID
+
+    def _mark(self, mso: int, state: str) -> None:
+        self.state = state
+        self.state_trace.append((int(mso), state))
+        if RANK[state] > RANK[self.reached]:
+            self.reached = state
 
 
 def evaluate_session(bars: pd.DataFrame, levels: dict[str, float],
@@ -261,19 +282,17 @@ def evaluate_session(bars: pd.DataFrame, levels: dict[str, float],
             break
         leg = detect_leg(h, l, c, o, i)
         if leg is None:
-            res.state_trace.append((int(mso[i]), INVALID))
+            res._mark(mso[i], INVALID)
             continue
         res.leg = leg
         if not origin_held(h, l, leg, i):
-            res.state = INVALID
-            res.state_trace.append((int(mso[i]), INVALID))
+            res._mark(mso[i], INVALID)
             continue
 
         sigs = bar_count(h, l, leg, i, p.tick)
         new = [s for s in sigs if s.signal_i not in seen and s.signal_i == i]
         if not new:
-            res.state = DEVELOPING
-            res.state_trace.append((int(mso[i]), DEVELOPING))
+            res._mark(mso[i], DEVELOPING)
             continue
 
         for s in new:
@@ -295,15 +314,28 @@ def evaluate_session(bars: pd.DataFrame, levels: dict[str, float],
                 reason="" if ok else "max_entries reached"))
             if ok:
                 taken += 1
-        res.state = ACTIVE
-        res.state_trace.append((int(mso[i]), ACTIVE))
+        res._mark(mso[i], ACTIVE)
     return res
 
 
 # --------------------------------------------------------------------------- #
 # the live sentence
 # --------------------------------------------------------------------------- #
-def live_status(res: OTCResult, p: OTCParams = OTCParams()) -> str:
+def clock(mso: int, cfg: Config = DEFAULT_CONFIG) -> str:
+    """Minutes after the cash open -> the Berlin wall-clock time on the chart."""
+    t = cfg.cash_open_minutes() + int(mso)
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
+def live_status(res: OTCResult, p: OTCParams = OTCParams(),
+                cfg: Config = DEFAULT_CONFIG) -> str:
+    """The sentence to read at the deadline.
+
+    It reports the state NOW and, separately, any trigger that already fired --
+    a session that counted an H1 at 10:00 and then ran shows DEVELOPING on the
+    10:30 bar, and saying only "WAIT" would hide the very signal the engine
+    produced.
+    """
     if res.leg is None:
         return ("**OTC status: INVALID.**\nNo established direction from the open.\n"
                 "**Decision: PASS** — DAX gives nothing today.")
@@ -311,17 +343,31 @@ def live_status(res: OTCResult, p: OTCParams = OTCParams()) -> str:
     lines = [f"**OTC status: {res.state}.**", f"Direction: {d}.",
              f"Follow-through: {res.leg.followthrough_bars} bars beyond bar 1 "
              f"({'sufficient' if res.leg.followthrough_bars >= 2 else 'insufficient'})."]
+
     live = [s for s in res.signals if s.taken]
-    if res.state == ACTIVE and live:
+    if live:
+        lines.append("Triggers counted so far: " + ", ".join(
+            f"{s.label} at {clock(s.signal_mso, cfg)} "
+            f"({'above' if s.side > 0 else 'below'} {s.entry_px:.0f}, "
+            f"stop {s.stop_px:.0f}"
+            + (f", T1 {s.target_px:.0f} {s.target_name}, R:R {s.rr}" if s.target_px
+               else ", no untouched level ahead")
+            + ")" for s in live))
+    if not live and res.signals:
+        lines.append(f"{len(res.signals)} further trigger(s) counted but skipped: "
+                     "the session's entry cap was already used.")
+
+    fresh = live and live[-1].signal_mso == (res.state_trace[-1][0] if res.state_trace else -1)
+    if res.state == ACTIVE and fresh:
         s = live[-1]
-        lines += [f"Current state: {s.label} continuation trigger.",
-                  f"Trigger: {'above' if s.side > 0 else 'below'} {s.entry_px:.0f}.",
-                  f"Stop: {'below' if s.side > 0 else 'above'} {s.stop_px:.0f}.",
-                  f"T1: {s.target_px:.0f} ({s.target_name})." if s.target_px
-                  else "T1: no untouched structural level ahead.",
-                  f"R:R: {s.rr}." if s.rr else "R:R: not computable.",
+        lines += [f"Current state: {s.label} continuation trigger, live now.",
                   "**Decision: TAKE**" if (s.rr or 0) >= 1 else
                   "**Decision: TAKE — but R:R below 1, your call.**"]
+    elif live:
+        lines += [f"Current state: the {live[-1].label} trigger already fired at "
+                  f"{clock(live[-1].signal_mso, cfg)} — you are in that trade or you "
+                  "missed it.",
+                  "**Decision: NO NEW ENTRY** — a fresh entry needs a fresh count."]
     elif res.state == DEVELOPING:
         lines += ["Current state: direction established, no completed rotation yet.",
                   "**Decision: WAIT** — do not enter an extended move."]

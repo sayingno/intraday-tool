@@ -13,6 +13,23 @@ The first worked example is the pattern:
 
 ---
 
+## Quick start
+
+Everything runs from the repository root. The raw data is committed, so a fresh
+clone has what it needs — only `data/processed/` has to be built.
+
+```bash
+pip install -r requirements.txt
+python -m pytest                                          # 56 tests, ~2.4s
+python -m dax_analog_explorer.preprocess --cutoff 10:30   # ~1m15s, once
+python -m dax_analog_explorer.otc_report --date 2026-05-05   # the live sentence
+streamlit run dax_analog_explorer/app.py                  # the explorer UI
+```
+
+Full command list in [§8](#8-running-it).
+
+---
+
 ## 1. What the data actually is (audited, not assumed)
 
 Two raw sources ship in the repo. The pipeline **detects** their properties and
@@ -311,8 +328,17 @@ python -m dax_analog_explorer.otc_report --date 2026-05-05   # the live sentence
 
 ### What the backtest found
 
-6,560 sessions: **8.4% ACTIVE**, 33.3% DEVELOPING, 58.4% INVALID. 6,495 signals,
-of which 3,331 fill.
+Of 6,560 sessions the furthest state reached by 10:30 is **ACTIVE 47.3%**
+(3,105 sessions), DEVELOPING 13.8%, INVALID 38.8%. Those 3,105 sessions produce
+6,495 signals, of which 3,331 fill.
+
+*Furthest reached* is the number that answers "does this setup show up". The
+state on the **last bar** is a different question — it drops back to `DEVELOPING`
+the bar after a trigger fires, because that bar counted nothing new — and
+`OTCResult` carries both (`reached` and `state`). Reading a session as of an
+earlier moment is what `--deadline` is for: `--date 2026-05-05 --deadline 60`
+replays that day as it stood at 10:00 and returns `ACTIVE … Decision: TAKE`,
+where the same day at the 10:30 default reports the trigger as already fired.
 
 | cut | n filled | expectancy | t |
 |---|---|---|---|
@@ -345,7 +371,7 @@ exactly what fails. The best surviving cell (H2/L2 with R:R ≥ 1) is −0.184R
 in-sample −0.110R, **out-of-sample −0.275R** — it gets worse out of sample, which
 is the opposite of what a real edge does.
 
-**Two corrections found by reading the charts, both of which changed the result:**
+**Three corrections found by reading the output rather than trusting it:**
 
 * the leg carried on each signal is the leg **as it stood when that signal
   fired** — a session can build a bear leg, fail, then build a bull one, so the
@@ -354,7 +380,12 @@ is the opposite of what a real edge does.
   stop would sit. Leaving it working and filling it later booked a result against
   a stop that had already been violated — **1,404 of 4,735 "trades"** were
   setups no trader would still have had on. Removing them moved expectancy from
-  −0.216R to −0.180R and is the honest number.
+  −0.216R to −0.180R and is the honest number;
+* the state machine reported the **last bar's** state as the session's state, so
+  a day that counted an H1 at 10:00 and then simply ran said `DEVELOPING → WAIT`
+  at 10:30 and never mentioned its own trigger. `--profile` inherited the same
+  field and was answering "did a trigger fire on the very final bar" — which is
+  why it read 8.4% instead of 47.3%.
 
 **The finding, plainly: OTC as specified does not have a positive expectancy on
 this data.** That is a result, not a failure of the build — it tests the setup as
@@ -366,25 +397,75 @@ today"* remains the correct boundary; what the numbers argue against is the
 
 ## 8. Running it
 
+Every command is run **from the repository root** (`config.Paths` resolves paths
+from there) and every timing below was measured on this dataset, not estimated.
+
+### Step 1 — build the data (once)
+
 ```bash
 pip install -r requirements.txt
-
-# 1) one-time preprocessing  ->  data/processed/*.parquet + audit_report.txt
 python -m dax_analog_explorer.preprocess --cutoff 10:30
-#    options: --roll-method {carry,ratio,difference,none}  --no-audit
-
-# 2) the app
-streamlit run dax_analog_explorer/app.py
+#   options: --roll-method {carry,ratio,difference,none}   --no-audit
 ```
 
+**~1m15s.** Converts DAX 5m Chicago→Berlin, merges the two sources, back-adjusts
+the rolls, and writes `data/processed/`:
+
+```
+cleaned_dax_5m.parquet  cleaned_fdax_1m.parquet  master_5m.parquet
+daily_features.parquet  opening_path_features.parquet  audit_report.{json,txt}
+```
+
+That directory is git-ignored — delete it and re-run any time. **Nothing else
+works until this has run**, because every command below reads
+`master_5m.parquet` + `daily_features.parquet`.
+
+### Step 2 — everything else
+
+| command | what it gives you | time |
+|---|---|---|
+| `otc_report --date 2026-05-05` | the live sentence for one session: state, direction, follow-through, every trigger counted with its stop / target / R:R, and the decision | 4s |
+| `otc_report --date 2026-05-05 --deadline 60` | the same day **as it stood at 10:00** — how to read a morning bar by bar | 4s |
+| `otc_report --profile` | furthest state reached across history: ACTIVE 47.3% / DEVELOPING 13.8% / INVALID 38.8% | 12s |
+| `otc_report` | the full backtest, split by H1/H2 and L1/L2, in- vs out-of-sample | 18s |
+| `otc_report --pdf otc.pdf --pdf-max 24` | the annotated chart pack: context above, the traded window zoomed below | 1m02s |
+| `context_report --list` | every context category and the flag that selects it | 3s |
+| `context_report --profile` | the label mix of the whole dataset | 26s |
+| `context_report --location AT_ATH NEAR_ATH --opening REJECTION_UP` | a category scan: condition chain, funnel, dates, conditional probabilities | 41s |
+| `setup_report` | the geometric setup scan + *P(level reached \| not reached by the decision bar)* | 44s |
+| `continuation_report` | the opening-drive continuation backtest (the 09:30 at-market entry OTC bans) | 36s |
+| `streamlit run dax_analog_explorer/app.py` | the analog-day explorer UI | — |
+
+Prefix each with `python -m dax_analog_explorer.` — e.g.
+`python -m dax_analog_explorer.otc_report --profile`.
+
+`context_report` and `setup_report` cache their session tables into
+`data/processed/` on first use, so a repeated scan with the same window is much
+faster; `setup_report --rebuild` forces a fresh one.
+
+Useful `otc_report` knobs: `--deadline 90` (minutes after the open — 90 = 10:30),
+`--max-entries 2`, `--cost 2.0` (points round trip), `--split 2017-01-01`,
+`--csv trades.csv`.
+
 In the app: pick a **reference date** and **cutoff**, choose **Mode 3**, hit
-**Find analogs** — or click **“Load the worked example”** to reproduce the ATH
+**Find analogs** — or click **"Load the worked example"** to reproduce the ATH
 gap-up → weak-follow-through query at 10:30 over the last 10 years and return the
 20 most similar days. The **Dates only** tab answers *"just show me the dates."*
 
-Artifacts written to `data/processed/` (git-ignored, regenerate any time):
-`cleaned_dax_5m.parquet`, `cleaned_fdax_1m.parquet`, `master_5m.parquet`,
-`daily_features.parquet`, `opening_path_features.parquet`, `audit_report.{json,txt}`.
+### The data ends 2026-05-19
+
+There is no live feed. `--date` past the last session fails on purpose:
+
+```
+$ python -m dax_analog_explorer.otc_report --date 2026-06-01
+no session on 2026-06-01 — the data covers 2000-05-29 .. 2026-05-19.
+  (a later date needs its bars appended to a FDAX_1min_*.csv and
+   'python -m dax_analog_explorer.preprocess' re-run)
+```
+
+To read a morning that is not in the data yet, append its 1-minute bars to a
+`FDAX_1min_*.csv` in the same format (see §2), re-run `preprocess`, then call
+`otc_report --date <today> --deadline <minutes since 09:00>`.
 
 ---
 
@@ -426,7 +507,7 @@ data/processed/        generated parquet artifacts (git-ignored)
 ## 10. Tests
 
 ```bash
-python -m pytest        # 54 tests, ~2s
+python -m pytest        # 56 tests, ~2.4s
 ```
 
 Covers ATH calculation, no-future-leakage, Europe/Berlin + Chicago DST,
@@ -438,7 +519,8 @@ hand-built bars, the count resetting on a new leg extreme, a climax reaching
 `DEVELOPING` but never `ACTIVE`, a pullback through the leg origin invalidating,
 the 3rd signal in a session being `NOT_TAKEN`, an untriggered entry not counting
 as a loss, an entry cancelled when its stop level breaks first, and the stop
-winning on a bar that contains both stop and target.
+winning on a bar that contains both stop and target, and a fired trigger still
+being reported when a later quiet bar drops the state back to `DEVELOPING`.
 
 ---
 

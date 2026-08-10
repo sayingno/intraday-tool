@@ -89,7 +89,7 @@ def build_otc_trades(groups: dict, daily: pd.DataFrame,
                    "kind": s.label[0], "side": s.side, "signal_mso": s.signal_mso,
                    "entry_px": s.entry_px, "stop_px": s.stop_px,
                    "target_name": s.target_name, "target_px": s.target_px,
-                   "rr": s.rr, "taken": s.taken, "state": res.state}
+                   "rr": s.rr, "taken": s.taken, "state": res.reached}
             row.update(simulate_signal(g, s, p) if s.taken else {"status": "NOT_TAKEN"})
             rows.append(row)
     t = pd.DataFrame(rows)
@@ -177,7 +177,14 @@ def main():
 
     if a.date:
         sd = pd.Timestamp(a.date).normalize()
-        r = daily.set_index("session_date").loc[sd]
+        di = daily.set_index("session_date")
+        if sd not in di.index or sd not in groups:
+            lo, hi = daily.session_date.min().date(), daily.session_date.max().date()
+            print(f"no session on {sd.date()} — the data covers {lo} .. {hi}.")
+            print("  (a later date needs its bars appended to a FDAX_1min_*.csv "
+                  "and 'python -m dax_analog_explorer.preprocess' re-run)")
+            raise SystemExit(1)
+        r = di.loc[sd]
         print(otc.live_status(otc.evaluate_session(groups[sd], _levels(r), p), p))
         return
 
@@ -187,9 +194,11 @@ def main():
         for sd, g in groups.items():
             if sd not in di.index:
                 continue
-            counts[otc.evaluate_session(g, _levels(di.loc[sd]), p).state] += 1
+            # the FURTHEST state reached, not the state on the final bar
+            counts[otc.evaluate_session(g, _levels(di.loc[sd]), p).reached] += 1
         tot = sum(counts.values())
-        print(f"OTC state at the {a.deadline}-minute deadline, {tot} sessions\n")
+        print(f"Furthest OTC state reached by the {a.deadline}-minute deadline, "
+              f"{tot} sessions\n")
         for k in (otc.ACTIVE, otc.DEVELOPING, otc.INVALID):
             print(f"  {k:<12}{counts[k]:>6}  ({100*counts[k]/tot:>5.1f}%)")
         return
