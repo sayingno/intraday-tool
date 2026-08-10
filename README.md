@@ -28,6 +28,38 @@ streamlit run dax_analog_explorer/app.py                  # the explorer UI
 
 Full command list in [§8](#8-running-it).
 
+### On Windows
+
+Same commands, three differences. Run them in **PowerShell**, not Command
+Prompt:
+
+```powershell
+py -m pip install -r requirements.txt
+py -m pytest
+py -m dax_analog_explorer.preprocess --cutoff 10:30
+py -m dax_analog_explorer.otc_report --date 2026-05-05
+py -m streamlit run dax_analog_explorer\app.py
+```
+
+1. **`py -m pip`, never bare `pip`.** `pip.exe` is a launcher with the path to
+   its interpreter baked in at install time. Move or uninstall that Python and it
+   fails with `Fatal error in launcher: Unable to create process using
+   "…\Python39\python.exe"` — the shim survives, the interpreter does not. `py`
+   is the version launcher; it finds whatever is actually installed. `py -0p`
+   lists them.
+2. **`py`, not `python`.** A bare `python` on a machine with no python.org
+   install hits the Microsoft Store alias and answers *"Python was not found; run
+   without arguments to install from the Microsoft Store"*. If `py -0p` lists
+   nothing, install **Python 3.12 from python.org** — not the Store — and tick
+   **"Add python.exe to PATH"** in the installer.
+3. **Never paste the `#` comments into Command Prompt.** `cmd.exe` has no comment
+   syntax, so `pip install -r requirements.txt   # pandas, numpy` passes
+   `#`, `pandas,` and `numpy` to pip as filenames. PowerShell and bash both
+   understand `#`; `cmd.exe` does not.
+
+Python 3.9 or newer works (every module carries `from __future__ import
+annotations`); 3.11 is what the timings above were measured on.
+
 ---
 
 ## 1. What the data actually is (audited, not assumed)
