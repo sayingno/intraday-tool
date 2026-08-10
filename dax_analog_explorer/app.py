@@ -1,304 +1,298 @@
-"""Streamlit MVP — DAX Analog Day Explorer.
+"""DAX Open Trend Continuation — the Streamlit front end.
 
-Run with:   streamlit run dax_analog_explorer/app.py
+Two things, and deliberately only two:
 
-Describe the current DAX session, choose an observation cutoff (e.g. 10:30
-Berlin), and the tool finds historically similar days, shows their charts, and
-reports what happened AFTER the cutoff -- as a historical conditional
-distribution, never a prediction, always with sample size.
+  1. **Read one session.**  Pick a day and a moment, get the OTC state as it
+     stood then, every trigger counted with its stop / target / R:R, and the
+     chart with the anatomy drawn on it.
+  2. **Filter by context, then look at OTC inside that context.**  Choose
+     categories — location, swing, prior day, gap, opening — and see how often
+     the setup even appears there and what it did.
+
+The analog-similarity search that used to live here is gone; its engines remain
+in the package for the CLIs, but nothing in this app depends on them.
+
+    streamlit run dax_analog_explorer/app.py
 """
 from __future__ import annotations
 
-import datetime as dt
 import sys
 from pathlib import Path
 
-# Streamlit executes this file as a script, so Python may only add this file's
-# directory to sys.path.  Add the repository root so the package imports below
-# work whether Streamlit is launched from the repository root or elsewhere.
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+if __package__ in (None, ""):                      # `streamlit run app.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 from dax_analog_explorer.config import Config
-from dax_analog_explorer import search as S
-from dax_analog_explorer import charts as ch
-from dax_analog_explorer import reports as rp
-from dax_analog_explorer.similarity_engine import FilterSpec
+from dax_analog_explorer import charts, context as ctx, continuation as co
+from dax_analog_explorer import otc, otc_report as orp
 
-st.set_page_config(page_title="DAX Analog Day Explorer", layout="wide")
+st.set_page_config(page_title="DAX · Open Trend Continuation", layout="wide")
 cfg = Config()
 
+CATEGORIES = {
+    "location": ctx.LOCATION, "swing": ctx.SWING, "ma_state": ctx.MA_STATE,
+    "prior_day_type": ctx.PRIOR_DAY, "gap_bucket": ctx.GAP,
+    "open_loc": ctx.OPEN_LOC, "overnight_type": ctx.OVERNIGHT, "opening": ctx.OPENING,
+}
+LABELS = {"location": "Where we are", "swing": "Swing state",
+          "ma_state": "Moving-average state", "prior_day_type": "Yesterday",
+          "gap_bucket": "Gap", "open_loc": "Open vs yesterday's range",
+          "overnight_type": "Overnight", "opening": "Opening 15 minutes"}
+
 
 # --------------------------------------------------------------------------- #
-# data loading (cached)
+# loading — the heavy work happens once per session, not once per widget change
 # --------------------------------------------------------------------------- #
-@st.cache_data(show_spinner=True)
-def load_data():
-    p = cfg.paths
-    if not p.daily_features.exists():
-        return None
-    daily = pd.read_parquet(p.daily_features)
-    opening = pd.read_parquet(p.opening_path_features)
-    master = pd.read_parquet(p.master_5m)
-    audit = ""
-    if p.audit_report_txt.exists():
-        try:
-            audit = p.audit_report_txt.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            # Artifacts generated on Windows before UTF-8 was made explicit
-            # were encoded with the system code page (normally CP-1252).
-            audit = p.audit_report_txt.read_text(encoding="cp1252")
-    return daily, opening, master, audit
+@st.cache_resource(show_spinner="loading bars …")
+def load_bars():
+    master = pd.read_parquet(cfg.paths.master_5m)
+    return master, co.session_groups(master, cfg)
 
 
-data = load_data()
-if data is None:
-    st.error("Processed data not found. Run:  `python -m dax_analog_explorer.preprocess`")
+@st.cache_data(show_spinner="loading daily features …")
+def load_daily() -> pd.DataFrame:
+    return pd.read_parquet(cfg.paths.daily_features)
+
+
+@st.cache_data(show_spinner="labelling context (first run ~25s) …")
+def load_context(decision_min: int) -> pd.DataFrame:
+    return ctx.load_context_table(cfg, decision_min)
+
+
+@st.cache_data(show_spinner="walking every session (~20s) …")
+def load_trades(deadline: int, max_entries: int, cost: float) -> pd.DataFrame:
+    _, groups = load_bars()
+    p = otc.OTCParams(trigger_deadline_min=deadline, max_entries=max_entries,
+                      cost_points=cost)
+    return orp.build_otc_trades(groups, load_daily(), p)
+
+
+try:
+    master, groups = load_bars()
+    daily = load_daily()
+except FileNotFoundError:
+    st.error("No processed data yet. Run this once, from the repository root:\n\n"
+             "`python -m dax_analog_explorer.preprocess --cutoff 10:30`")
     st.stop()
-daily, opening, master, audit_txt = data
-available = pd.DatetimeIndex(sorted(daily["session_date"].unique()))
 
+sessions = sorted(groups)
+di = daily.set_index("session_date")
 
-def snap_date(d) -> pd.Timestamp:
-    d = pd.Timestamp(d)
-    idx = available.searchsorted(d)
-    idx = min(max(idx, 0), len(available) - 1)
-    # nearest of the two neighbours
-    cands = [available[max(idx - 1, 0)], available[idx]]
-    return min(cands, key=lambda x: abs((x - d).days))
-
-
-# --------------------------------------------------------------------------- #
-# sidebar controls
-# --------------------------------------------------------------------------- #
-st.sidebar.header("1 · Data & reference")
-period = st.sidebar.selectbox("Historical period",
-    ["Last year", "Last 5 years", "Last 10 years", "Entire dataset"], index=2)
-
-default_ref = snap_date(available[-1] - pd.Timedelta(days=5))
-ref_in = st.sidebar.date_input("Reference date", value=default_ref.date(),
-    min_value=available[0].date(), max_value=available[-1].date())
-reference_date = snap_date(ref_in)
-if reference_date.date() != ref_in:
-    st.sidebar.caption(f"↳ snapped to trading day **{reference_date.date()}**")
-
-cut_choice = st.sidebar.selectbox("Observation cutoff (Berlin)",
-    ["09:15", "09:30", "10:00", "10:30", "custom"], index=3)
-if cut_choice == "custom":
-    ct = st.sidebar.time_input("custom cutoff", value=dt.time(10, 30))
-    cutoff_str = ct.strftime("%H:%M")
-else:
-    cutoff_str = cut_choice
-cutoff_min = cfg.minutes_since_open(cfg.cutoff_time(cutoff_str))
-
-st.sidebar.header("2 · Search mode")
-mode = st.sidebar.radio("Mode", [S.MODE_COMBINED, S.MODE_SIM, S.MODE_EXACT], index=0)
-n_results = st.sidebar.slider("Number of matches", 5, 50, cfg.default_n_results, 1)
-
-st.sidebar.header("3 · Context filters")
-use_ath = st.sidebar.checkbox("Near ATH", value=True)
-ath_tol = st.sidebar.select_slider("ATH tolerance (%)",
-    options=list(cfg.ath_tolerances_pct), value=cfg.default_ath_tolerance_pct)
-req_ath_open = st.sidebar.checkbox("Open above prior ATH (new ATH at open)", value=False)
-req_ath_on = st.sidebar.checkbox("Overnight reached prior ATH", value=False)
-gap_sign = st.sidebar.selectbox("Gap direction", ["any", "positive", "negative"], index=1)
-open_pdh = st.sidebar.checkbox("Open above PDH", value=True)
-open_pdl = st.sidebar.checkbox("Open below PDL", value=False)
-regimes = st.sidebar.multiselect("Volatility regime", ["low", "normal", "high"], default=[])
-
-st.sidebar.header("4 · Opening-pattern filters")
-fb_bull = st.sidebar.checkbox("Bullish first bar", value=True)
-fb_pctl = st.sidebar.slider("First-bar range ≥ percentile", 0, 99, int(cfg.first_bar_range_pctl))
-fb_close = st.sidebar.slider("First-bar close location ≥", 0.0, 1.0, cfg.first_bar_close_top_frac, 0.05)
-ext_max = st.sidebar.slider("Extension ratio <", 0.0, 3.0, cfg.weak_extension_ratio_max, 0.05)
-ov_min = st.sidebar.slider("Overlap ratio >", 0.0, 1.0, cfg.weak_overlap_ratio_min, 0.05)
-weak_dl = st.sidebar.selectbox("Bearish weakness before", ["none", "10:00", "10:30", "10:45", "11:00"], index=2)
-
-st.sidebar.header("5 · Similarity weights")
-w_ctx = st.sidebar.slider("Market context", 0, 100, int(cfg.weight_context * 100))
-w_fb = st.sidebar.slider("First-bar structure", 0, 100, int(cfg.weight_first_bar * 100))
-w_ps = st.sidebar.slider("Post-spike path", 0, 100, int(cfg.weight_post_spike * 100))
-w_wk = st.sidebar.slider("Weakness structure", 0, 100, int(cfg.weight_weakness * 100))
-weights = {"context": w_ctx, "first_bar": w_fb, "post_spike": w_ps, "weakness": w_wk}
-
-path_method = st.sidebar.selectbox("Path distance", ["correlation", "euclidean", "cosine", "dtw"], index=0)
-path_unit = st.sidebar.selectbox("Path units", ["atr", "pct", "points", "prior_range"], index=0)
-
-
-def build_spec() -> FilterSpec:
-    return FilterSpec(
-        ath_within_pct=(ath_tol if use_ath else None),
-        require_ath_at_open=req_ath_open, require_ath_overnight=req_ath_on,
-        gap_sign=(None if gap_sign == "any" else gap_sign),
-        open_above_pdh=open_pdh, open_below_pdl=open_pdl,
-        vol_regimes=(tuple(regimes) if regimes else None),
-        first_bar_bull=fb_bull,
-        first_bar_range_pctl_min=(fb_pctl if fb_pctl > 0 else None),
-        first_bar_close_top_frac=(fb_close if fb_close > 0 else None),
-        extension_ratio_max=(ext_max if ext_max < 3.0 else None),
-        overlap_ratio_min=(ov_min if ov_min > 0 else None),
-        weakness_before_min=(None if weak_dl == "none"
-                             else cfg.minutes_since_open(cfg.cutoff_time(weak_dl))))
+# The final session in the data can be a partial day (the newest FDAX file ends
+# mid-session), which makes a confusing first impression -- every trade exits on
+# "close" at whatever bar the data stopped.  Open on the last COMPLETE session.
+_full = [d for d in sessions if groups[d]["mso"].max() >= 480]
+DEFAULT_DAY = (_full or sessions)[-1]
 
 
 # --------------------------------------------------------------------------- #
-# header + run
+# sidebar — scope only.  Nothing here tunes the setup; see otc.OTCParams.
 # --------------------------------------------------------------------------- #
-st.title("DAX Analog Day Explorer")
-st.caption("Futures-only, roll back-adjusted (method: **%s**). Analogs are a "
-           "historical conditional distribution — not a prediction." % cfg.roll_adjust_method)
+st.sidebar.header("Session")
+picked = st.sidebar.date_input("Date", value=DEFAULT_DAY.date(),
+                               min_value=sessions[0].date(), max_value=sessions[-1].date())
+sd = pd.Timestamp(picked).normalize()
+if sd not in groups:                                # weekend / holiday
+    earlier = [d for d in sessions if d <= sd]
+    sd = earlier[-1] if earlier else sessions[0]
+    st.sidebar.caption(f"↳ no session that day; showing **{sd.date()}**")
 
-c1, c2 = st.columns([1, 3])
-run = c1.button("🔎 Find analogs", type="primary", use_container_width=True)
-flagship = c2.button("Load the worked example (ATH gap-up → weak follow-through, 10:30)",
-                     use_container_width=True)
+as_of = st.sidebar.slider("Read the session as of", min_value=30, max_value=510,
+                          value=90, step=5,
+                          format="%d min", help="minutes after the 09:00 open")
+st.sidebar.caption(f"↳ **{otc.clock(as_of)}** Berlin — triggers after this are ignored")
 
-if flagship:
-    st.session_state["run"] = True
-    st.session_state["flagship"] = True
-if run:
-    st.session_state["run"] = True
-    st.session_state["flagship"] = False
+st.sidebar.header("Scope")
+max_entries = st.sidebar.slider("Max entries per session", 1, 4, 2)
+cost = st.sidebar.number_input("Round-trip cost (points)", 0.0, 20.0, 2.0, 0.5)
+st.sidebar.caption("The setup itself has no tunable values — every rule is a bar "
+                   "count or a structural comparison. These three are scope only.")
 
-if st.session_state.get("run"):
-    spec = S.flagship_filter(cfg) if st.session_state.get("flagship") else build_spec()
-    wts = None if st.session_state.get("flagship") else weights
-    use_cut = 90 if st.session_state.get("flagship") else cutoff_min
-    use_cut_str = "10:30" if st.session_state.get("flagship") else cutoff_str
-    with st.spinner("Matching…"):
-        res = S.run_search(daily, opening, master, reference_date=reference_date,
-                           cutoff_min=use_cut, cutoff_str=use_cut_str,
-                           mode=(S.MODE_COMBINED if st.session_state.get("flagship") else mode),
-                           spec=spec, weights=wts, period=period, n=n_results,
-                           path_method=path_method, path_unit=path_unit, cfg=cfg)
+P = otc.OTCParams(trigger_deadline_min=as_of, max_entries=max_entries, cost_points=cost)
 
-    if len(res.merged_top) == 0:
-        st.warning(
-            f"**No matching sessions.** The candidate pool was {res.n_pool} and "
-            "nothing survived the filters.\n\n"
-            "The opening-pattern filters are the usual cause — they are ANDed "
-            "together, so a few strict ones can empty the result. Try, in order:\n"
-            "1. **Extension ratio <** → raise it to 3.00 (turns it off)\n"
-            "2. **First-bar range ≥ percentile** → lower it to 0\n"
-            "3. **Bearish weakness before** → set to *none*\n"
-            "4. **ATH tolerance** → widen to 1.00%\n"
-            "5. **Historical period** → *Entire dataset*")
-        st.markdown(res.interpreted)
-        st.info(f"**Reference {res.reference_date.date()}** — {res.reference_desc}")
+st.title("DAX · Open Trend Continuation")
+st.caption("Open develops direction → genuine follow-through → controlled pullback "
+           "→ continuation trigger in the same direction. Nothing else is a trade.")
+
+tab_day, tab_ctx = st.tabs(["① Read a session", "② Context filter"])
+
+
+# --------------------------------------------------------------------------- #
+# ① one session
+# --------------------------------------------------------------------------- #
+def evaluate(day: pd.Timestamp, p: otc.OTCParams):
+    bars = groups[day].sort_values("mso")
+    levels = orp._levels(di.loc[day])
+    res = otc.evaluate_session(bars, levels, p)
+    sims = [orp.simulate_signal(bars, s, p) if s.taken else {"status": "NOT_TAKEN"}
+            for s in res.signals]
+    return bars, levels, res, sims
+
+
+def signal_table(res: otc.OTCResult, sims: list[dict]) -> pd.DataFrame:
+    rows = []
+    for s, sim in zip(res.signals, sims):
+        rows.append({
+            "signal": s.label, "at": otc.clock(s.signal_mso),
+            "side": "buy" if s.side > 0 else "sell",
+            "trigger": round(s.entry_px), "stop": round(s.stop_px),
+            "target": None if s.target_px is None else round(s.target_px),
+            "T1": s.target_name or "—", "R:R": s.rr,
+            "risk (pts)": round(abs(s.entry_px - s.stop_px)),
+            "outcome": sim.get("status", ""),
+            "exit": otc.clock(sim["exit_mso"]) if sim.get("exit_mso") is not None else "—",
+            "why": sim.get("reason", "—"),
+            "R": None if sim.get("R_multiple") is None else round(sim["R_multiple"], 2)})
+    return pd.DataFrame(rows)
+
+
+with tab_day:
+    bars, levels, res, sims = evaluate(sd, P)
+    left, right = st.columns([2, 3])
+
+    with left:
+        st.subheader(f"{sd.date():%A %d %B %Y} · as of {otc.clock(as_of)}")
+        state_note = {otc.ACTIVE: "success", otc.DEVELOPING: "warning",
+                      otc.INVALID: "error"}[res.state]
+        # markdown swallows single newlines; the sentence is written one fact per
+        # line and has to stay that way to be readable
+        getattr(st, state_note)(otc.live_status(res, P).replace("\n", "  \n"))
+
+        if sd in load_context(30).set_index("session_date").index:
+            row = load_context(30).set_index("session_date").loc[sd]
+            st.markdown("**Context**")
+            st.dataframe(pd.DataFrame(
+                {"dimension": [LABELS[f] for f in CATEGORIES],
+                 "label": [row[f] for f in CATEGORIES]}),
+                hide_index=True, use_container_width=True)
+
+    with right:
+        title = f"{sd.date()} · reached {res.reached}"
+        st.plotly_chart(
+            charts.otc_session(bars, {**levels, "OPEN": di.loc[sd].get("cash_open_adj")},
+                               orp.session_mark(bars, res, sims), as_of, title),
+            use_container_width=True)
+
+    if res.signals:
+        st.markdown("**Triggers counted**")
+        st.dataframe(signal_table(res, sims), hide_index=True, use_container_width=True)
+    else:
+        st.info("No trigger counted in this window — the setup never reached state C. "
+                "Drag *Read the session as of* later to see whether one forms.")
+
+
+# --------------------------------------------------------------------------- #
+# ② context filter -> how OTC behaves inside it
+# --------------------------------------------------------------------------- #
+def performance_block(sub: pd.DataFrame, label: str) -> None:
+    filled = sub[sub.status == "TRADED"]
+    if len(filled) < 5:
+        st.write(f"{label}: {len(sub)} signals, {len(filled)} filled — too few to quote.")
+        return
+    perf = co.performance(filled)
+    c = st.columns(5)
+    c[0].metric("filled trades", len(filled))
+    c[1].metric("expectancy", f"{perf['expectancy_R']:+.3f}R")
+    c[2].metric("t-stat", f"{perf['t_stat']:.2f}")
+    c[3].metric("win rate", f"{perf['win_rate_%']:.1f}%")
+    c[4].metric("profit factor", f"{perf['profit_factor']:.2f}")
+
+
+def by_count(sub: pd.DataFrame) -> pd.DataFrame:
+    """H1/L1 against H2/L2 side by side — the mandate's own claim, tested."""
+    rows = []
+    for k, name in ((1, "H1 / L1 — first attempt"), (2, "H2 / L2 — second attempt"),
+                    (3, "H3+ / L3+ — wedge territory")):
+        part = sub[sub["count"] == k] if k < 3 else sub[sub["count"] >= 3]
+        filled = part[part.status == "TRADED"]
+        if len(filled) < 5:
+            rows.append({"attempt": name, "signals": len(part), "filled": len(filled),
+                         "expectancy": None, "t": None, "win %": None, "profit factor": None})
+            continue
+        p = co.performance(filled)
+        rows.append({"attempt": name, "signals": len(part), "filled": len(filled),
+                     "expectancy": round(p["expectancy_R"], 3), "t": round(p["t_stat"], 2),
+                     "win %": round(p["win_rate_%"], 1),
+                     "profit factor": round(p["profit_factor"], 2)})
+    return pd.DataFrame(rows)
+
+
+with tab_ctx:
+    st.subheader("Pick the context, then look at what the setup did inside it")
+    st.caption("Categories only — no thresholds. Every cut is a rolling percentile of "
+               "the instrument's own prior history, so a label means the same thing in "
+               "2003 and 2026. Leave a box empty to ignore that dimension.")
+
+    table = load_context(30)
+    cols = st.columns(4)
+    chosen = {}
+    for i, (field, values) in enumerate(CATEGORIES.items()):
+        with cols[i % 4]:
+            got = st.multiselect(LABELS[field], list(values), default=[], key=f"ctx_{field}")
+            if got:
+                chosen[field] = tuple(got)
+
+    spec = ctx.ContextSpec(**chosen)
+    mask = ctx.apply_context(table, spec)
+    picked_dates = table.loc[mask, "session_date"]
+    st.markdown(f"**{int(mask.sum())} of {len(table)} sessions** match "
+                f"({100 * mask.mean():.1f}%).")
+
+    if chosen:
+        with st.expander("What each condition costs in sample size"):
+            st.dataframe(ctx.context_funnel(table, spec), hide_index=True,
+                         use_container_width=True)
+
+    if mask.sum() == 0:
+        st.warning("No session matches that combination — loosen a dimension.")
         st.stop()
 
-    tabs = st.tabs(["① Query & matches", "② Explanations", "③ Charts",
-                    "④ Statistics", "⑤ Dates only", "⑥ Data audit"])
+    trades = load_trades(as_of, max_entries, cost)
+    sub = trades[trades.session_date.isin(set(picked_dates))] if len(trades) else trades
 
-    # ---- ① query + matches ----
-    with tabs[0]:
-        st.subheader("Interpreted query")
-        st.markdown(res.interpreted)
-        st.info(f"**Reference {res.reference_date.date()}** — {res.reference_desc}")
-        st.subheader("Progressive matching")
-        st.markdown(rp.relaxation_note(res.tiers))
-        st.caption(f"Candidate pool: {res.n_pool} · showing top {len(res.ranked_top)}")
-        show_cols = ["session_date", "similarity_score", "distance_open_to_ath_pct",
-                     "gap_pct", "open_vs_pdh_pct", "first_bar_range", "extension_ratio",
-                     "post_spike_overlap_ratio", "post_spike_efficiency",
-                     "first_bearish_expansion_min", "return_at_cash_close_pct",
-                     "max_favorable_excursion_pct", "max_adverse_excursion_pct",
-                     "day_classification"]
-        show_cols = [c for c in show_cols if c in res.merged_top.columns]
-        tbl = res.merged_top[show_cols].copy()
-        tbl["session_date"] = tbl["session_date"].dt.date
-        st.dataframe(tbl.round(3), use_container_width=True, height=430)
+    st.markdown("### Does the setup even appear here?")
+    reached = (trades[trades.session_date.isin(set(picked_dates))]
+               .groupby("session_date").state.first())
+    with_sig = len(reached)
+    st.write(f"**{with_sig} of {int(mask.sum())}** matching sessions "
+             f"({100 * with_sig / max(mask.sum(), 1):.1f}%) produced at least one trigger "
+             f"by {otc.clock(as_of)}, against 47.3% across all history.")
 
-    # ---- ② explanations ----
-    with tabs[1]:
-        st.subheader("Why each session matched")
-        for _, r in res.merged_top.iterrows():
-            d = r["session_date"]
-            exp = res.explanations.get(d)
-            if not exp:
-                continue
-            with st.expander(f"{pd.Timestamp(d).date()} · score {r['similarity_score']:.1f} · "
-                             f"{r.get('day_classification','')}"):
-                st.markdown(rp.similarity_explanation_text(exp))
-                if r.get("day_classification_reason"):
-                    st.caption("Classification: " + str(r["day_classification_reason"]))
+    st.markdown("### And what did it do?")
+    performance_block(sub, "all triggers")
+    st.caption("H2/L2 is the mandate's primary — the second attempt at the pullback. "
+               "A blank row means too few filled trades in this context to quote a rate.")
+    st.dataframe(by_count(sub), hide_index=True, use_container_width=True)
 
-    # ---- ③ charts ----
-    with tabs[2]:
-        st.subheader("Reference day")
-        rbars = S.day_bars(master, res.reference_date, cfg)
-        st.plotly_chart(ch.day_candles(rbars, res.cutoff_min, cfg,
-                        title=f"Reference {res.reference_date.date()}"),
-                        use_container_width=True)
-        c1, c2 = st.columns(2)
-        with c1:
-            st.plotly_chart(ch.analog_overlay(res.grid, res.path_mat, res.path_kept,
-                            res.reference_date, res.cutoff_min, res.path_unit),
-                            use_container_width=True)
-        with c2:
-            ref_path = None
-            if res.reference_date in res.path_kept:
-                ref_path = res.path_mat[res.path_kept.index(res.reference_date)]
-            others = np.array([res.path_mat[i] for i, d in enumerate(res.path_kept)
-                               if d != res.reference_date])
-            st.plotly_chart(ch.median_band(res.grid, others, res.cutoff_min, ref_path,
-                            res.path_unit), use_container_width=True)
-        st.subheader("Top analog candlesticks")
-        top_dates = res.merged_top["session_date"].head(6).tolist()
-        cols = st.columns(2)
-        for i, d in enumerate(top_dates):
-            b = S.day_bars(master, d, cfg)
-            if len(b):
-                cols[i % 2].plotly_chart(
-                    ch.day_candles(b, res.cutoff_min, cfg, title=str(pd.Timestamp(d).date())),
-                    use_container_width=True)
+    if len(sub[sub.status == "TRADED"]) >= 20:
+        with st.expander("In-sample vs out-of-sample"):
+            st.dataframe(co.split_performance(sub[sub.status == "TRADED"], "2017-01-01"),
+                         hide_index=True, use_container_width=True)
 
-    # ---- ④ statistics ----
-    with tabs[3]:
-        h = res.headline
-        st.subheader(f"Outcome distribution — sample size {h['sample_size']}")
-        if h["sample_size"] < 5:
-            st.warning("Very small sample — treat as indicative only.")
-        k = st.columns(4)
-        k[0].metric("Median close vs cutoff", f"{h['median_return_at_close_pct']:.2f}%")
-        k[1].metric("Closed above open", f"{h['positive_close_%']:.0f}%")
-        k[2].metric("Median MFE", f"{h['median_MFE_pct']:.2f}%")
-        k[3].metric("Median MAE", f"{h['median_MAE_pct']:.2f}%")
-        k2 = st.columns(4)
-        k2[0].metric("Full gap fill", f"{h['full_gap_fill_%']:.0f}%")
-        k2[1].metric("Broke observed high", f"{h['break_observed_high_%']:.0f}%")
-        k2[2].metric("Broke observed low", f"{h['break_observed_low_%']:.0f}%")
-        st.dataframe(res.stats.round(3), use_container_width=True)
-        cc = st.columns(2)
-        if "return_at_cash_close_pct" in res.merged_top:
-            cc[0].plotly_chart(ch.outcome_distribution(
-                res.merged_top["return_at_cash_close_pct"], "Return to cash close",
-                "% from cutoff"), use_container_width=True)
-        if "max_adverse_excursion_pct" in res.merged_top:
-            cc[1].plotly_chart(ch.outcome_distribution(
-                res.merged_top["max_adverse_excursion_pct"], "Max adverse excursion",
-                "% from cutoff"), use_container_width=True)
+    st.markdown("### The matching sessions")
+    show = table.loc[mask, ["session_date"] + list(CATEGORIES)].copy()
+    show["triggers"] = show.session_date.map(
+        sub.groupby("session_date").label.apply(lambda s: " ".join(s)) if len(sub) else {})
+    show["R"] = show.session_date.map(
+        sub[sub.status == "TRADED"].groupby("session_date").R_multiple.sum().round(2)
+        if len(sub) else {})
+    st.dataframe(show.sort_values("session_date", ascending=False),
+                 hide_index=True, use_container_width=True, height=320)
+    st.download_button("Download these dates as CSV", show.to_csv(index=False),
+                       file_name="context_matches.csv", mime="text/csv")
 
-    # ---- ⑤ dates only ----
-    with tabs[4]:
-        st.subheader("Dates only")
-        do = rp.dates_only(res.merged_top["session_date"])
-        st.dataframe(do, use_container_width=True, height=430)
-        st.download_button("Download dates (CSV)", do.to_csv(index=False),
-                           file_name="analog_dates.csv")
-        st.code("\n".join(do["date"].tolist()))
-
-    # ---- ⑥ audit ----
-    with tabs[5]:
-        st.subheader("Data audit")
-        st.text(audit_txt or "run preprocess to generate the audit report")
-else:
-    st.info("Set the reference date and cutoff, then **Find analogs** — or click the "
-            "worked-example button to reproduce the ATH gap-up → weak-follow-through query.")
-    with st.expander("Data audit report"):
-        st.text(audit_txt)
+    st.markdown("### Chart one of them")
+    pick = st.selectbox("Session", list(show.session_date.sort_values(ascending=False)),
+                        format_func=lambda d: f"{d.date()} ({d.day_name()[:3]})")
+    if pick is not None:
+        b2, lv2, r2, s2 = evaluate(pd.Timestamp(pick).normalize(), P)
+        st.plotly_chart(
+            charts.otc_session(b2, {**lv2, "OPEN": di.loc[pick].get("cash_open_adj")},
+                               orp.session_mark(b2, r2, s2), as_of,
+                               f"{pd.Timestamp(pick).date()} · reached {r2.reached}"),
+            use_container_width=True)
+        if r2.signals:
+            st.dataframe(signal_table(r2, s2), hide_index=True, use_container_width=True)
