@@ -30,6 +30,8 @@ UP = "#2e9e5b"
 DOWN = "#d1495b"
 BLUE = "#2a78d6"
 OBS_FILL = "#2a78d6"
+OTC_INK = "#1f4e79"
+OTC_PB = "#a4632a"
 LEVELS = [("PDH", "previous_day_high", "#c77b2a"),
           ("PDC", "previous_close", "#8a8984"),
           ("PDL", "previous_day_low", "#c77b2a"),
@@ -113,6 +115,139 @@ def draw_session(ax, bars: pd.DataFrame, day: pd.Series, decision_min: int,
     ax.set_title(title, fontsize=10, color=INK, loc="left")
 
 
+def _otc_overlay(ax, sd: pd.DataFrame, mark: dict, label: bool = True) -> None:
+    """Draw the OTC anatomy on the signal session: for every counted signal, the
+    leg it belongs to (origin and extreme), the pullback extreme, and the
+    trigger / stop / target it traded.
+
+    ``sd`` is the signal session's bars carrying both ``mso`` (minutes from the
+    open, how the engine indexes bars) and ``x`` (the chart position -- equal to
+    ``mso`` on the zoom panel, the continuous index on the context panel).
+
+    Everything is drawn per signal rather than per session, because a session can
+    build a bear leg, fail, and then build a bull one: the leg standing at the
+    deadline is not necessarily the leg any given signal came from.  Nothing is
+    re-derived from the prices, so a drawing that disagrees with the numbers is a
+    bug made visible rather than hidden.
+    """
+    if not len(sd) or not mark:
+        return
+    xof = dict(zip(sd["mso"].astype(int), sd["x"].astype(float)))
+    x0, x1 = float(sd["x"].min()), float(sd["x"].max())
+    span = x1 - x0
+    # signals cluster within a few bars of each other, so every label needs the
+    # page's own background behind it or the text stacks into an unreadable smear
+    box = dict(boxstyle="square,pad=0.12", facecolor=SURFACE, edgecolor="none",
+               alpha=0.78)
+    named: set[str] = set()       # a target name is written once per session
+    drawn_legs: set[tuple] = set()
+
+    for k, s in enumerate(mark.get("signals", [])):
+        sx = xof.get(int(s["signal_mso"]))
+        if sx is None:
+            continue
+        up = int(s.get("side", mark.get("side", 1))) > 0
+        taken = bool(s.get("taken", True))
+        status = s.get("status")
+        note = ("" if taken else " (not taken)")
+        if status == "CANCELLED":
+            note = " (cancelled — stop broke first)"
+        elif status == "NOT_TRIGGERED":
+            note = " (never triggered)"
+        col = OTC_INK if (taken and status in (None, "TRADED")) else MUTED
+        # two signals a few bars apart routinely share an exit bar and a target,
+        # so each one's text is stepped away from the previous one's
+        step = k * 10 * (1 if up else -1)
+
+        leg_key = (s.get("leg_origin_px"), s.get("leg_extreme_px"), up)
+        if s.get("leg_origin_px") is not None and leg_key not in drawn_legs:
+            drawn_legs.add(leg_key)
+            ax.hlines(s["leg_origin_px"], x0, x1, color=OTC_INK, lw=1.1, zorder=6)
+            if label:
+                ax.annotate("leg origin", (x0, s["leg_origin_px"]),
+                            textcoords="offset points", xytext=(2, 3 if up else -9),
+                            fontsize=6.5, color=OTC_INK, zorder=10, bbox=box)
+            ex = xof.get(int(s["leg_extreme_mso"])) if s.get("leg_extreme_mso") is not None else None
+            if ex is not None and s.get("leg_extreme_px") is not None:
+                ax.plot([ex], [s["leg_extreme_px"]], marker="v" if up else "^",
+                        ms=5, color=OTC_INK, zorder=9)
+                if label:
+                    ax.annotate("leg high" if up else "leg low",
+                                (ex, s["leg_extreme_px"]), textcoords="offset points",
+                                xytext=(4, 8 if up else -14), fontsize=6.5,
+                                color=OTC_INK, zorder=10, bbox=box)
+
+        # the trade's lines stop where the trade did -- running them to the end of
+        # the session buries the candles under horizontals that no longer applied
+        exx = xof.get(int(s["exit_mso"])) if s.get("exit_mso") is not None else None
+        xe = exx if exx is not None else min(x1, sx + span * 0.35)
+
+        ax.plot([sx], [s["entry_px"]], marker="^" if up else "v", ms=6,
+                color=col, zorder=9)
+        ax.annotate(s["label"] + note,
+                    (sx, s["entry_px"]), textcoords="offset points",
+                    xytext=(-4, 7 if up else -13), fontsize=7.5, color=col,
+                    weight="bold", zorder=10, bbox=box)
+        ax.hlines(s["entry_px"], sx, xe, color=col, lw=1.0, zorder=7)
+        ax.hlines(s["stop_px"], sx, xe, color=DOWN, lw=1.0, ls=(0, (2, 2)), zorder=7)
+        if s.get("pullback_px") is not None:
+            ax.plot([sx], [s["pullback_px"]], marker="_", ms=9, color=OTC_PB, zorder=9)
+        if s.get("target_px") is not None:
+            ax.hlines(s["target_px"], sx, xe, color=UP, lw=1.0, ls=(0, (4, 2)), zorder=7)
+            if label and taken and s.get("target_name") not in named:
+                named.add(s.get("target_name"))
+                ax.annotate(str(s.get("target_name", "T1")), (xe, s["target_px"]),
+                            textcoords="offset points", xytext=(3, 2), ha="left",
+                            fontsize=6.5, color=UP, zorder=10, bbox=box)
+        if exx is not None and s.get("exit_px") is not None:
+            good = (s.get("R_multiple") or 0) > 0
+            ax.plot([exx], [s["exit_px"]], marker="o", ms=5,
+                    color=UP if good else DOWN, zorder=9)
+            if label:
+                ax.annotate(f"{s.get('reason', '')} {s.get('R_multiple', 0):+.2f}R",
+                            (exx, s["exit_px"]), textcoords="offset points",
+                            xytext=(5, (-12 if up else 6) - step), fontsize=7,
+                            color=UP if good else DOWN, zorder=10, bbox=box)
+
+
+def draw_zoom(ax, bars: pd.DataFrame, day: pd.Series, mark: dict | None,
+              upto_min: int, title: str = "") -> None:
+    """The signal session on its own, cut at ``upto_min``, so the anatomy the
+    engine reacted to is actually legible instead of 18 bars out of 300."""
+    b = bars[bars["mso"] <= upto_min].sort_values("mso").copy()
+    if not len(b):
+        return
+    b["x"] = b["mso"].astype(float)
+    _candles(ax, b, width=3.4)
+
+    lo_all, hi_all = float(b["adj_low"].min()), float(b["adj_high"].max())
+    pad = (hi_all - lo_all) * 0.12 or 1.0
+    xmax = float(b["mso"].max())
+    for name, col, colour in LEVELS:
+        v = day.get(col)
+        if v is None or pd.isna(v) or not (lo_all - pad <= v <= hi_all + pad):
+            continue
+        ax.axhline(v, color=colour, lw=0.9, ls=(0, (5, 3)), zorder=2)
+        ax.text(xmax + 3, v, f" {name}", va="center", fontsize=7, color=colour,
+                clip_on=False)
+    if mark:
+        _otc_overlay(ax, b, mark)
+
+    ax.set_xlim(-4, xmax + 6)
+    ax.set_ylim(lo_all - pad, hi_all + pad)
+    ticks = [t for t in range(0, int(xmax) + 1, 30)]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels([f"{9 + t // 60:02d}:{t % 60:02d}" for t in ticks],
+                       fontsize=8, color=INK_2)
+    ax.tick_params(colors=INK_2, labelsize=8)
+    ax.grid(axis="y", color=GRID, lw=0.7); ax.set_axisbelow(True)
+    for sp in ("top", "right"):
+        ax.spines[sp].set_visible(False)
+    for sp in ("left", "bottom"):
+        ax.spines[sp].set_color(GRID)
+    ax.set_title(title, fontsize=9, color=INK_2, loc="left")
+
+
 def multiday_frame(master: pd.DataFrame, date, lookback: int = 2,
                    cfg: Config = DEFAULT_CONFIG, ema_fast: int = 20,
                    ema_slow: int = 50) -> pd.DataFrame:
@@ -139,7 +274,8 @@ def multiday_frame(master: pd.DataFrame, date, lookback: int = 2,
 
 
 def draw_multiday(ax, f: pd.DataFrame, signal_date, day: pd.Series,
-                  decision_min: int, trade: dict | None = None, title: str = "") -> None:
+                  decision_min: int, trade: dict | None = None, title: str = "",
+                  otc_mark: dict | None = None) -> None:
     """Multi-session panel: candles, both EMAs, session separators, the signal
     session shaded, and its levels drawn only across that session."""
     for _, r in f.iterrows():
@@ -187,6 +323,8 @@ def draw_multiday(ax, f: pd.DataFrame, signal_date, day: pd.Series,
             ax.hlines(trade["entry"], x0, x1 + 0.5, color=BLUE, lw=1.2, zorder=7)
             ax.hlines(trade["stop_init"], x0, x1 + 0.5, color=DOWN, lw=1.0,
                       ls=(0, (2, 2)), zorder=7)
+        if otc_mark:
+            _otc_overlay(ax, sd, otc_mark, label=False)
 
     # x labels: one per session
     ticks, labels = [], []
@@ -208,7 +346,8 @@ def multiday_pdf(path: str, dates, master: pd.DataFrame, daily: pd.DataFrame,
                  decision_min: int = 30, lookback: int = 2,
                  trades: pd.DataFrame | None = None, context: pd.DataFrame | None = None,
                  cfg: Config = DEFAULT_CONFIG, per_page: int = 2,
-                 title: str = "Sessions in context", subtitle: str = "") -> str:
+                 title: str = "Sessions in context", subtitle: str = "",
+                 otc_marks: dict | None = None) -> str:
     di = daily.set_index("session_date")
     tr = trades.set_index("session_date") if trades is not None and len(trades) else None
     cx = context.set_index("session_date") if context is not None and len(context) else None
@@ -249,7 +388,11 @@ def multiday_pdf(path: str, dates, master: pd.DataFrame, daily: pd.DataFrame,
                 t = tr.loc[d].to_dict() if (tr is not None and d in tr.index) else None
                 if t:
                     bits.append(f"{t['reason']} {t['R_multiple']:+.2f}R")
-                draw_multiday(ax, f, d, day, decision_min, t, "   ·   ".join(bits))
+                mark = (otc_marks or {}).get(d)
+                if mark:
+                    bits.append(" ".join(s["label"] for s in mark.get("signals", [])))
+                draw_multiday(ax, f, d, day, decision_min, t,
+                              "   ·   ".join(b for b in bits if b), mark)
             for ax in axes[len(chunk):, 0]:
                 ax.axis("off")
             fig.tight_layout(rect=(0.01, 0.01, 0.97, 0.99))
@@ -310,6 +453,66 @@ def sessions_to_pdf(path: str, dates, master: pd.DataFrame, daily: pd.DataFrame,
                 draw_session(ax, groups[d], day, decision_min, t, "   ·   ".join(bits))
             for ax in axes[len(chunk):, 0]:
                 ax.axis("off")
+            fig.tight_layout(rect=(0.01, 0.01, 0.96, 0.99))
+            pdf.savefig(fig, facecolor=SURFACE); plt.close(fig)
+    return path
+
+
+def otc_pdf(path: str, dates, master: pd.DataFrame, daily: pd.DataFrame,
+            marks: dict, deadline: int = 90, lookback: int = 1,
+            zoom_extra_min: int = 90, cfg: Config = DEFAULT_CONFIG,
+            title: str = "Open Trend Continuation — signals",
+            subtitle: str = "") -> str:
+    """One page per signal session: the multi-session context above, and below it
+    the session zoomed to the window the engine actually traded."""
+    ms = sb.attach_sessions(master, cfg)
+    cash = ms[ms["is_cash"] & (ms["mso"] >= 0)]
+    groups = dict(tuple(cash.groupby("session_date")))
+    di = daily.set_index("session_date")
+    dates = [pd.Timestamp(d).normalize() for d in dates]
+
+    with PdfPages(path) as pdf:
+        fig = plt.figure(figsize=(11.7, 8.3), facecolor=SURFACE)
+        fig.text(0.06, 0.86, title, fontsize=21, color=INK, weight="bold")
+        fig.text(0.06, 0.805, subtitle or f"{len(dates)} sessions · Xetra hours only "
+                 f"(09:00–17:30) · triggers must fire by "
+                 f"{9 + deadline // 60:02d}:{deadline % 60:02d}",
+                 fontsize=11, color=INK_2)
+        for i, t in enumerate([
+            "Top panel     the signal session (shaded) with the prior session(s); EMA 20 / EMA 50 on cash bars",
+            "Bottom panel  the same session zoomed to the trading window, with the OTC anatomy",
+            "Solid navy    leg origin — the pullback may not trade through it (rule 4)",
+            "▼ / ▲ navy    leg extreme, then each counted signal bar, labelled H1/H2 or L1/L2 (rule 5)",
+            "Orange dash   the pullback extreme used for the stop     red dashes  stop (rule 6)",
+            "Green dashes  the next untouched structural level = target (rule 7); the dot is the exit",
+        ]):
+            fig.text(0.06, 0.71 - i * 0.035, t, fontsize=9, color=INK_2)
+        fig.text(0.06, 0.09, "Historical record, not a recommendation.",
+                 fontsize=8.5, color=MUTED)
+        pdf.savefig(fig, facecolor=SURFACE); plt.close(fig)
+
+        for d in dates:
+            if d not in groups:
+                continue
+            day = di.loc[d] if d in di.index else pd.Series(dtype=float)
+            mark = (marks or {}).get(d)
+            fig, axes = plt.subplots(2, 1, figsize=(11.7, 8.3), facecolor=SURFACE,
+                                     gridspec_kw={"height_ratios": [1.0, 1.25]})
+            for ax in axes:
+                ax.set_facecolor(SURFACE)
+            f = multiday_frame(master, d, lookback, cfg)
+            bits = [str(d.date()), d.day_name()[:3]]
+            if mark:
+                bits.append(" ".join(f"{s['label']}{'' if s.get('taken', True) else '*'}"
+                                     for s in mark.get("signals", [])))
+            if len(f):
+                draw_multiday(axes[0], f, d, day, deadline, None,
+                              "   ·   ".join(bits), mark)
+            else:
+                axes[0].axis("off")
+            draw_zoom(axes[1], groups[d], day, mark, deadline + zoom_extra_min,
+                      f"zoom · 09:00–{9 + (deadline + zoom_extra_min) // 60:02d}:"
+                      f"{(deadline + zoom_extra_min) % 60:02d}")
             fig.tight_layout(rect=(0.01, 0.01, 0.96, 0.99))
             pdf.savefig(fig, facecolor=SURFACE); plt.close(fig)
     return path
