@@ -103,14 +103,41 @@ def _levels(row: pd.Series) -> dict:
              ("ONL", "overnight_low_adj"))}
 
 
-def chart_marks(groups: dict, daily: pd.DataFrame, dates, trades: pd.DataFrame,
-                p: otc.OTCParams) -> dict:
-    """What the chart should draw, taken straight from the engine's own decision.
+def session_mark(bars: pd.DataFrame, res: otc.OTCResult,
+                 sims: list[dict] | None = None) -> dict:
+    """What a chart should draw for one session, from the engine's own decision.
 
     Nothing here is recomputed from prices: the leg extreme is the bar the engine
     called the extreme, and each signal's trigger/stop/target are the values it
     traded.  If the drawing and the numbers ever disagree, the bug is visible.
+
+    ``sims`` is the outcome of each signal in ``res.signals`` order, when it is
+    already known; without it the anatomy is drawn but no exits are.
     """
+    mso = bars.sort_values("mso")["mso"].to_numpy()
+    sigs = []
+    for k, s in enumerate(res.signals):
+        row = {"label": s.label, "signal_mso": s.signal_mso, "entry_px": s.entry_px,
+               "stop_px": s.stop_px, "target_px": s.target_px,
+               "target_name": s.target_name, "pullback_px": s.pullback_px,
+               "taken": s.taken, "side": s.side,
+               "leg_origin_px": s.leg_origin_px, "leg_extreme_px": s.leg_extreme_px,
+               "leg_extreme_mso": (int(mso[s.leg_extreme_i])
+                                   if s.leg_extreme_i is not None else None)}
+        sim = sims[k] if sims is not None and k < len(sims) else None
+        if sim:
+            row["status"] = sim.get("status")
+            if sim.get("status") == "TRADED":
+                row.update(exit_mso=sim.get("exit_mso"), exit_px=sim.get("exit_px"),
+                           reason=sim.get("reason"), R_multiple=sim.get("R_multiple"))
+        sigs.append(row)
+    return {"side": sigs[-1]["side"] if sigs else (res.leg.side if res.leg else 1),
+            "state": res.state, "reached": res.reached, "signals": sigs}
+
+
+def chart_marks(groups: dict, daily: pd.DataFrame, dates, trades: pd.DataFrame,
+                p: otc.OTCParams) -> dict:
+    """``session_mark`` for each date, with outcomes joined from the trade table."""
     di = daily.set_index("session_date")
     ti = trades.set_index(["session_date", "signal_mso"]) if len(trades) else None
     marks = {}
@@ -122,24 +149,15 @@ def chart_marks(groups: dict, daily: pd.DataFrame, dates, trades: pd.DataFrame,
         res = otc.evaluate_session(g, _levels(di.loc[d]), p)
         if res.leg is None:
             continue
-        mso = g["mso"].to_numpy()
-        sigs = []
+        sims = []
         for s in res.signals:
-            row = {"label": s.label, "signal_mso": s.signal_mso, "entry_px": s.entry_px,
-                   "stop_px": s.stop_px, "target_px": s.target_px,
-                   "target_name": s.target_name, "pullback_px": s.pullback_px,
-                   "taken": s.taken, "side": s.side,
-                   "leg_origin_px": s.leg_origin_px, "leg_extreme_px": s.leg_extreme_px,
-                   "leg_extreme_mso": (int(mso[s.leg_extreme_i])
-                                       if s.leg_extreme_i is not None else None)}
             if ti is not None and (d, s.signal_mso) in ti.index:
                 t = ti.loc[(d, s.signal_mso)]
                 t = t.iloc[0] if isinstance(t, pd.DataFrame) else t
-                row["status"] = t.get("status")
-                if t.get("status") == "TRADED":
-                    row.update(exit_mso=t.get("exit_mso"), exit_px=t.get("exit_px"),
-                               reason=t.get("reason"), R_multiple=t.get("R_multiple"))
-            sigs.append(row)
+                sims.append(t.to_dict())
+            else:
+                sims.append(None)
+        sigs = session_mark(g, res, sims)["signals"]
         marks[d] = {"side": sigs[-1]["side"] if sigs else res.leg.side,
                     "state": res.state, "signals": sigs}
     return marks

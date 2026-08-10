@@ -359,6 +359,23 @@ def intraday_ema(bars: pd.DataFrame, span: int, upto_mso: int) -> float:
 # --------------------------------------------------------------------------- #
 # 5. assemble one table
 # --------------------------------------------------------------------------- #
+def load_context_table(cfg: Config = DEFAULT_CONFIG, decision_min: int = 30,
+                       p: ContextParams = DEFAULT_PARAMS) -> pd.DataFrame:
+    """The context table for one decision bar, built once and cached on disk.
+
+    Labelling every session takes ~25s, so both the CLI and the app read through
+    here rather than each keeping their own copy of the cache logic.
+    """
+    path = cfg.paths.processed_dir / f"context_table_b{decision_min}.parquet"
+    if path.exists():
+        return pd.read_parquet(path)
+    t = build_context_table(pd.read_parquet(cfg.paths.master_5m),
+                            pd.read_parquet(cfg.paths.daily_features),
+                            cfg, p, decision_min=decision_min)
+    t.to_parquet(path, index=False)
+    return t
+
+
 def build_context_table(master: pd.DataFrame, daily: pd.DataFrame,
                         cfg: Config = DEFAULT_CONFIG,
                         p: ContextParams = DEFAULT_PARAMS,

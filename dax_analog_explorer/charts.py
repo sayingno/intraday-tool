@@ -98,3 +98,104 @@ def outcome_distribution(values: np.ndarray, title: str, xlabel: str) -> go.Figu
     fig.update_layout(title=title, xaxis_title=xlabel, yaxis_title="days",
                       height=300, margin=dict(l=40, r=20, t=40, b=40))
     return fig
+
+
+OTC_INK = "#1f4e79"
+LEVEL_COLORS = {"PDH": "#c77b2a", "PDC": "#8a8984", "PDL": "#c77b2a",
+                "ONH": "#b06bb0", "ONL": "#b06bb0", "OPEN": "#52514e"}
+
+
+def otc_session(bars: pd.DataFrame, levels: dict, mark: dict | None,
+                deadline_min: int, title: str = "") -> go.Figure:
+    """One session with the OTC anatomy drawn on it.
+
+    Same contract as the PDF overlay in ``chart_pdf``: every line is a value the
+    engine decided on, looked up through the bar's ``mso``, never re-derived from
+    the prices.  The x axis is minutes since 09:00 so it lines up with everything
+    else the tool prints.
+    """
+    b = bars.sort_values("mso")
+    fig = go.Figure(go.Candlestick(
+        x=b["mso"], open=b["adj_open"], high=b["adj_high"], low=b["adj_low"],
+        close=b["adj_close"], name="price", showlegend=False,
+        increasing_line_color="#2e9e5b", decreasing_line_color="#d1495b"))
+    lo, hi = float(b["adj_low"].min()), float(b["adj_high"].max())
+    pad = (hi - lo) * 0.08 or 1.0
+    xmax = float(b["mso"].max())
+
+    for name, v in levels.items():
+        if v is None or pd.isna(v) or not (lo - pad <= v <= hi + pad):
+            continue
+        fig.add_hline(y=float(v), line_dash="dot", line_width=1,
+                      line_color=LEVEL_COLORS.get(name, "#999"),
+                      annotation_text=name, annotation_position="right",
+                      annotation_font_size=10)
+
+    fig.add_vrect(x0=b["mso"].min(), x1=deadline_min, fillcolor=OBS_COLOR, line_width=0)
+    fig.add_vline(x=deadline_min, line_dash="dash", line_color="#444",
+                  annotation_text="trigger deadline", annotation_position="top left",
+                  annotation_font_size=10)
+
+    if mark:
+        xof = dict(zip(b["mso"].astype(int), b["mso"].astype(float)))
+        drawn = set()
+        for s in mark.get("signals", []):
+            up = int(s.get("side", 1)) > 0
+            taken = bool(s.get("taken", True))
+            status = s.get("status")
+            live = taken and status in (None, "TRADED")
+            col = OTC_INK if live else "#8a8984"
+
+            key = (s.get("leg_origin_px"), s.get("leg_extreme_px"), up)
+            if s.get("leg_origin_px") is not None and key not in drawn:
+                drawn.add(key)
+                fig.add_hline(y=float(s["leg_origin_px"]), line_width=1.4,
+                              line_color=OTC_INK, annotation_text="leg origin",
+                              annotation_position="left", annotation_font_size=10)
+                if s.get("leg_extreme_mso") is not None:
+                    fig.add_trace(go.Scatter(
+                        x=[s["leg_extreme_mso"]], y=[s["leg_extreme_px"]], mode="markers",
+                        marker=dict(symbol="triangle-down" if up else "triangle-up",
+                                    size=11, color=OTC_INK),
+                        name="leg high" if up else "leg low", showlegend=False,
+                        hovertemplate=("leg high" if up else "leg low") + " %{y:.0f}<extra></extra>"))
+
+            sx = xof.get(int(s["signal_mso"]))
+            if sx is None:
+                continue
+            xe = s.get("exit_mso") if s.get("exit_mso") is not None else min(xmax, sx + 60)
+            note = ("" if live else
+                    " (cancelled)" if status == "CANCELLED" else
+                    " (never triggered)" if status == "NOT_TRIGGERED" else " (not taken)")
+            fig.add_trace(go.Scatter(
+                x=[sx], y=[s["entry_px"]], mode="markers+text",
+                marker=dict(symbol="triangle-up" if up else "triangle-down",
+                            size=13, color=col),
+                text=[s["label"] + note], textposition="top center" if up else "bottom center",
+                textfont=dict(size=11, color=col), showlegend=False,
+                hovertemplate=f"{s['label']} trigger %{{y:.0f}}<extra></extra>"))
+            for y, colour, dash in ((s["entry_px"], col, "solid"),
+                                    (s["stop_px"], "#d1495b", "dash"),
+                                    (s.get("target_px"), "#2e9e5b", "dashdot")):
+                if y is None or pd.isna(y):
+                    continue
+                fig.add_shape(type="line", x0=sx, x1=xe, y0=float(y), y1=float(y),
+                              line=dict(color=colour, width=1.4, dash=dash))
+            if s.get("exit_mso") is not None and s.get("exit_px") is not None:
+                good = (s.get("R_multiple") or 0) > 0
+                fig.add_trace(go.Scatter(
+                    x=[s["exit_mso"]], y=[s["exit_px"]], mode="markers+text",
+                    marker=dict(size=9, color="#2e9e5b" if good else "#d1495b"),
+                    text=[f"{s.get('reason','')} {s.get('R_multiple',0):+.2f}R"],
+                    textposition="middle right", textfont=dict(size=10),
+                    showlegend=False, hoverinfo="skip"))
+
+    ticks = list(range(0, int(xmax) + 1, 30))
+    fig.update_layout(title=title, xaxis_title="Berlin time",
+                      yaxis_title="price (back-adjusted)",
+                      xaxis_rangeslider_visible=False, height=520,
+                      margin=dict(l=40, r=60, t=50, b=40),
+                      xaxis=dict(tickmode="array", tickvals=ticks,
+                                 ticktext=[f"{9 + t // 60:02d}:{t % 60:02d}" for t in ticks]))
+    fig.update_yaxes(range=[lo - pad, hi + pad])
+    return fig

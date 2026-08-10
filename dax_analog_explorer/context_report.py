@@ -24,14 +24,7 @@ CATEGORIES = {
 
 
 def _cache(cfg: Config, decision_min: int) -> pd.DataFrame:
-    path = cfg.paths.processed_dir / f"context_table_b{decision_min}.parquet"
-    if path.exists():
-        return pd.read_parquet(path)
-    daily = pd.read_parquet(cfg.paths.daily_features)
-    master = pd.read_parquet(cfg.paths.master_5m)
-    t = ctx.build_context_table(master, daily, cfg, decision_min=decision_min)
-    t.to_parquet(path, index=False)
-    return t
+    return ctx.load_context_table(cfg, decision_min)
 
 
 def main():

@@ -1,15 +1,25 @@
-# DAX Analog Day Explorer
+# DAX · Open Trend Continuation
 
-Describe what today's DAX session is doing, pick an **observation cutoff**
-(e.g. `10:30` Berlin), and the tool finds **historically similar trading days**,
-shows their intraday charts, and reports **what happened after the cutoff** — as
-a *historical conditional distribution*, never a prediction, always with the
-sample size shown.
+One setup, read off pure price action on 5-minute DAX futures bars:
 
-The first worked example is the pattern:
+> **Open develops direction → genuine follow-through → controlled pullback →
+> continuation trigger in the same direction.**
 
-> **ATH gap-up → opening bullish spike → weak follow-through → high-level stall →
-> first bearish weakness before ~10:30.**
+The tool answers two questions. *What is this morning doing right now* — the OTC
+state as of any moment, with every H1/H2 or L1/L2 trigger counted and its stop,
+target and R:R read off the structure ([§7d](#7d-open-trend-continuation-otc--the-one-executable-setup)).
+And *what has that done historically in this context* — filter by categorical
+context (where we are, the swing, yesterday, the gap, the opening) and get the
+conditional distribution with its sample size ([§7c](#7c-categorical-context-recognition)).
+
+**No fitted thresholds and no indicators in the decision path.** Every condition
+is a bar count or a structural comparison; the only numbers are scope choices
+(bar size, deadline, entry cap).
+
+The repository also still carries the earlier analog-similarity engine — describe
+a session, find historically similar days, read what happened after the cutoff
+(§6, §7, §7b). It is no longer what the app shows, and nothing in the OTC path
+depends on it.
 
 ---
 
@@ -23,10 +33,42 @@ pip install -r requirements.txt
 python -m pytest                                          # 56 tests, ~2.4s
 python -m dax_analog_explorer.preprocess --cutoff 10:30   # ~1m15s, once
 python -m dax_analog_explorer.otc_report --date 2026-05-05   # the live sentence
-streamlit run dax_analog_explorer/app.py                  # the explorer UI
+streamlit run dax_analog_explorer/app.py                  # the app
 ```
 
 Full command list in [§8](#8-running-it).
+
+### On Windows
+
+Same commands, three differences. Run them in **PowerShell**, not Command
+Prompt:
+
+```powershell
+py -m pip install -r requirements.txt
+py -m pytest
+py -m dax_analog_explorer.preprocess --cutoff 10:30
+py -m dax_analog_explorer.otc_report --date 2026-05-05
+py -m streamlit run dax_analog_explorer\app.py
+```
+
+1. **`py -m pip`, never bare `pip`.** `pip.exe` is a launcher with the path to
+   its interpreter baked in at install time. Move or uninstall that Python and it
+   fails with `Fatal error in launcher: Unable to create process using
+   "…\Python39\python.exe"` — the shim survives, the interpreter does not. `py`
+   is the version launcher; it finds whatever is actually installed. `py -0p`
+   lists them.
+2. **`py`, not `python`.** A bare `python` on a machine with no python.org
+   install hits the Microsoft Store alias and answers *"Python was not found; run
+   without arguments to install from the Microsoft Store"*. If `py -0p` lists
+   nothing, install **Python 3.12 from python.org** — not the Store — and tick
+   **"Add python.exe to PATH"** in the installer.
+3. **Never paste the `#` comments into Command Prompt.** `cmd.exe` has no comment
+   syntax, so `pip install -r requirements.txt   # pandas, numpy` passes
+   `#`, `pandas,` and `numpy` to pip as filenames. PowerShell and bash both
+   understand `#`; `cmd.exe` does not.
+
+Python 3.9 or newer works (every module carries `from __future__ import
+annotations`); 3.11 is what the timings above were measured on.
 
 ---
 
@@ -434,7 +476,7 @@ works until this has run**, because every command below reads
 | `context_report --location AT_ATH NEAR_ATH --opening REJECTION_UP` | a category scan: condition chain, funnel, dates, conditional probabilities | 41s |
 | `setup_report` | the geometric setup scan + *P(level reached \| not reached by the decision bar)* | 44s |
 | `continuation_report` | the opening-drive continuation backtest (the 09:30 at-market entry OTC bans) | 36s |
-| `streamlit run dax_analog_explorer/app.py` | the analog-day explorer UI | — |
+| `streamlit run dax_analog_explorer/app.py` | **the app** — read one session, or filter by context and see what OTC did inside it | — |
 
 Prefix each with `python -m dax_analog_explorer.` — e.g.
 `python -m dax_analog_explorer.otc_report --profile`.
@@ -447,10 +489,31 @@ Useful `otc_report` knobs: `--deadline 90` (minutes after the open — 90 = 10:3
 `--max-entries 2`, `--cost 2.0` (points round trip), `--split 2017-01-01`,
 `--csv trades.csv`.
 
-In the app: pick a **reference date** and **cutoff**, choose **Mode 3**, hit
-**Find analogs** — or click **"Load the worked example"** to reproduce the ATH
-gap-up → weak-follow-through query at 10:30 over the last 10 years and return the
-20 most similar days. The **Dates only** tab answers *"just show me the dates."*
+### The app
+
+Two tabs, and deliberately only two.
+
+**① Read a session.** Pick a date and drag *Read the session as of* to the moment
+you want. You get the OTC state as it stood then, every trigger counted with its
+stop / target / R:R and what it did, the session's context labels, and the chart
+with the anatomy drawn on it — leg origin, leg extreme, the counted H1/H2 or
+L1/L2 bar, trigger, stop, target and the exit. Moving the slider replays the
+morning: the same day reads `ACTIVE · TAKE` at 10:00 and *"the trigger already
+fired"* at 10:30.
+
+**② Context filter.** Choose categories across the eight dimensions — leave a box
+empty to ignore it — and the app answers two questions in order: *does the setup
+even appear in this context* (share of matching sessions that produce a trigger,
+against 47.3% across all history) and *what did it do* (expectancy, t-stat, win
+rate, profit factor, split H1/L1 vs H2/L2 vs H3+, and in- vs out-of-sample). Then
+the matching dates, downloadable as CSV, and a chart of any one of them.
+
+The sidebar holds scope only — the date, the as-of time, the entry cap and the
+cost. Nothing in it tunes the setup, because the setup has nothing to tune.
+
+The analog-similarity search that used to be the app is gone. Its engines
+(`search.py`, `similarity_engine.py`, `path_matching.py`) remain in the package
+and are still covered by tests, but nothing in the app depends on them.
 
 ### The data ends 2026-05-19
 
@@ -484,7 +547,7 @@ dax_analog_explorer/
   path_matching.py     align-at-open paths, correlation/euclidean/cosine/DTW
   outcome_engine.py    post-cutoff outcomes, MFE/MAE, gap fills, touches
   classifications.py   explicit editable day-type rules
-  charts.py            plotly candles + aligned overlays + median band (observed vs outcome shaded)
+  charts.py            plotly: OTC session chart (leg/pullback/trigger/stop/target), candles, overlays
   reports.py           interpreted query, distribution stats, dates-only
   search.py            orchestrator (reference → analogs → outcomes → explanations)
   context.py           categorical context + opening-pattern recognition (OHLC + MAs)
@@ -497,7 +560,7 @@ dax_analog_explorer/
   continuation_report.py  CLI for the continuation grid
   chart_pdf.py         PDF chart packs: single session, multi-session Xetra view, OTC anatomy
   preprocess.py        command-line pipeline
-  app.py               Streamlit MVP
+  app.py               Streamlit app: read a session · context filter -> OTC performance
 tests/                 pytest: ATH, leakage, DST, prev-day, cutoff, rolls, gap-fill
 data/processed/        generated parquet artifacts (git-ignored)
 ```
