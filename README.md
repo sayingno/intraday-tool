@@ -258,6 +258,112 @@ The report prints the condition chain, a funnel showing the sample-size cost of
 each category, the matching dates, and the same conditional-probability table as
 `setup_report` — *P(level reached | not reached by the decision bar)*.
 
+## 7d. Open Trend Continuation (OTC) — the one executable setup
+
+`otc.py` is not another filter. `context.py` and `price_action.py` label a
+session at **one fixed cutoff**; OTC is a **sequence** —
+
+> open develops direction → genuine follow-through → controlled pullback →
+> continuation trigger in the same direction
+
+— so it is walked **bar by bar** and can fire at any time up to the deadline.
+
+**No fitted thresholds and no indicators in the decision path.** Every condition
+is a count or a structural comparison between bars. The only numbers are scope
+choices: the bar interval, the trigger deadline (10:30 Berlin) and how many
+entries a session may produce (2).
+
+| # | Rule | Pure-price test |
+|---|---|---|
+| 1 | direction | ≥2 consecutive higher highs **and** higher lows from the cash open (mirrored for a bear) |
+| 2 | follow-through | ≥2 **distinct** bars extend beyond bar 1's extreme — rejects "one big bar then nothing" without measuring bar size |
+| 3 | not extended | *no test of its own* — a climax has not pulled back so it cannot trigger (rule 4), and an over-run leg fails on its own R:R arithmetic (rule 7) |
+| 4 | pullback | the correction must not trade through the **leg origin** |
+| 5 | trigger | **H1/H2** (bull) or **L1/L2** (bear) bar counting; entry is a stop order 1 tick beyond the signal bar |
+| 6 | stop | 1 tick beyond the signal bar's extreme or the pullback extreme, whichever is structurally further |
+| 7 | target | the **nearest untouched structural level** ahead: PDH / PDC / PDL / ONH / ONL / the session's own extreme |
+
+R:R is **reported, not thresholded** — the TAKE/WAIT/PASS call on rules 1–5 is
+mechanical, and the judgement stays with the trader.
+
+### Bar counting
+
+Bull: the pullback opens on a bar with a **lower high**; the first later bar whose
+**high exceeds the prior bar's high** is **H1**; after another leg down, the next
+one is **H2**. Bear mirrors it on lows. The count **resets** on a new leg extreme,
+and that extreme is tracked **causally** — as the running max of the bars walked
+so far, never from the whole window, or every post-reset H1 is mislabelled H2.
+
+### Three states
+
+| state | condition | output |
+|---|---|---|
+| **A** | rules 1–2 not met | `INVALID` → no trade |
+| **B** | direction, no completed rotation | `DEVELOPING` → wait |
+| **C** | rules 1–5 met | `ACTIVE` → take |
+
+```bash
+python -m dax_analog_explorer.otc_report --profile      # how many days reach A / B / C
+python -m dax_analog_explorer.otc_report                # backtest, split by bar count
+python -m dax_analog_explorer.otc_report --pdf otc.pdf  # annotated chart pack
+python -m dax_analog_explorer.otc_report --date 2026-05-05   # the live sentence
+```
+
+### What the backtest found
+
+6,560 sessions: **8.4% ACTIVE**, 33.3% DEVELOPING, 58.4% INVALID. 6,495 signals,
+of which 3,331 fill.
+
+| cut | n filled | expectancy | t |
+|---|---|---|---|
+| all | 3,331 | **−0.180R** | −12.51 |
+| in-sample (pre-2017) | 1,932 | −0.202R | −10.15 |
+| out-of-sample (2017+) | 1,399 | −0.149R | −7.31 |
+| H1/L1 | 2,271 | −0.192R | −10.75 |
+| H2/L2 | 981 | **−0.157R** | −6.17 |
+
+The mandate's premise — *the second attempt is the reliable one* — holds
+**directionally**: H2/L2 beats H1/L1 on expectancy (−0.157R vs −0.192R), win rate
+(54.2% vs 49.3%) and profit factor (0.61 vs 0.52). It is not enough to reach zero.
+
+**Why it loses is structural, not directional.** The nearest untouched level
+(rule 7) is the session's own extreme in 4,787 of 6,495 signals, so the median
+target sits **7.3 points** away against **18.6 points** of structural risk —
+median R:R **0.38**, and only 16% of signals offer 1.0 or better. Selecting for
+better R:R makes it *worse*, monotonically:
+
+| filter | n filled | expectancy | t |
+|---|---|---|---|
+| all | 3,276 | −0.191R | −14.68 |
+| R:R ≥ 1.0 | 487 | −0.197R | −3.57 |
+| R:R ≥ 1.5 | 180 | −0.237R | −2.28 |
+| R:R ≥ 2.0 | 91 | −0.307R | −1.97 |
+| R:R ≥ 3.0 | 34 | −0.440R | −1.71 |
+
+A wide R:R is wide because the structure is stretched, and stretched structure is
+exactly what fails. The best surviving cell (H2/L2 with R:R ≥ 1) is −0.184R
+in-sample −0.110R, **out-of-sample −0.275R** — it gets worse out of sample, which
+is the opposite of what a real edge does.
+
+**Two corrections found by reading the charts, both of which changed the result:**
+
+* the leg carried on each signal is the leg **as it stood when that signal
+  fired** — a session can build a bear leg, fail, then build a bull one, so the
+  leg standing at the deadline is not the leg the signal came from;
+* an entry order is **cancelled** once price trades through the level where its
+  stop would sit. Leaving it working and filling it later booked a result against
+  a stop that had already been violated — **1,404 of 4,735 "trades"** were
+  setups no trader would still have had on. Removing them moved expectancy from
+  −0.216R to −0.180R and is the honest number.
+
+**The finding, plainly: OTC as specified does not have a positive expectancy on
+this data.** That is a result, not a failure of the build — it tests the setup as
+actually written, with structural stops and targets, rather than the 09:30
+at-market proxy the mandate bans (which lost more, −0.128R with no pullback and
+no trigger). The business rule *"if OTC does not develop, DAX gives me nothing
+today"* remains the correct boundary; what the numbers argue against is the
+**exit geometry**, not the pattern recognition.
+
 ## 8. Running it
 
 ```bash
@@ -304,6 +410,11 @@ dax_analog_explorer/
   context_report.py    CLI for category-based scans
   price_action.py      pure-geometry setup filtering + conditional probabilities
   setup_report.py      CLI for setup scan + conditional-probability report
+  otc.py               Open Trend Continuation: H1/H2-L1/L2 bar counting + state machine
+  otc_report.py        CLI: OTC profile, event-driven backtest, annotated chart pack
+  continuation.py      opening-drive continuation study + backtest harness (IS/OOS)
+  continuation_report.py  CLI for the continuation grid
+  chart_pdf.py         PDF chart packs: single session, multi-session Xetra view, OTC anatomy
   preprocess.py        command-line pipeline
   app.py               Streamlit MVP
 tests/                 pytest: ATH, leakage, DST, prev-day, cutoff, rolls, gap-fill
@@ -315,13 +426,19 @@ data/processed/        generated parquet artifacts (git-ignored)
 ## 10. Tests
 
 ```bash
-python -m pytest        # 21 tests, ~0.4s
+python -m pytest        # 54 tests, ~2s
 ```
 
 Covers ATH calculation, no-future-leakage, Europe/Berlin + Chicago DST,
 previous-day levels, observation-cutoff enforcement, contract-roll / back-
-adjustment handling, and gap-fill (including "touching the current-day open is
-**not** a full overnight gap fill").
+adjustment handling, gap-fill (including "touching the current-day open is
+**not** a full overnight gap fill"), categorical context labelling (a one-tick
+poke is not a rejection), and the OTC engine: H1/H2 and L1/L2 counting on
+hand-built bars, the count resetting on a new leg extreme, a climax reaching
+`DEVELOPING` but never `ACTIVE`, a pullback through the leg origin invalidating,
+the 3rd signal in a session being `NOT_TAKEN`, an untriggered entry not counting
+as a loss, an entry cancelled when its stop level breaks first, and the stop
+winning on a bar that contains both stop and target.
 
 ---
 
@@ -335,6 +452,11 @@ adjustment handling, and gap-fill (including "touching the current-day open is
 * Output is framed as a **historical conditional distribution** with sample size,
   not a claim that analogs predict the current session.
 * Every threshold, weight, session definition and roll method is **configurable**.
+* The OTC decision path contains **no fitted values at all** — only counts,
+  structural comparisons, and the scope choices (bar size, deadline, entry cap).
+* Negative results are reported as findings. OTC's −0.180R expectancy is stated
+  with its t-statistic and its out-of-sample split rather than filtered until it
+  looks profitable.
 
 ---
 
@@ -347,3 +469,10 @@ adjustment handling, and gap-fill (including "touching the current-day open is
   any high made inside that window (flagged in the audit).
 * 1-minute FDAX precision is available 2024-11 onward; cross-era similarity uses
   the common 5-minute grid (the flagship "last 10 years" query spans both eras).
+* OTC fills are simulated on 5-minute bars, so a bar containing both the stop and
+  the target is resolved pessimistically (stop wins) rather than by sequence —
+  1-minute resolution would settle those, but only for 2024-11 onward.
+* The OTC target is the nearest untouched level from a fixed set (PDH/PDC/PDL/
+  ONH/ONL/session extreme). A trader reading a chart would sometimes skip a level
+  as insignificant; the engine never does, and that is why the session extreme
+  dominates the target distribution.
